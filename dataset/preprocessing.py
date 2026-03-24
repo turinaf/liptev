@@ -45,21 +45,11 @@ def crop_lip_region(rgb_image, detection_result, padding=12, size=(96,96)):
     return lip_crop
 
 
-def extract_lip_frames(video_path, max_frames=75, model_path="face_landmarker.task"):
+def extract_lip_frames(video_path, detector):
     """
     Extracts frames from a video file and crops the lip region dynamically
-    using the provided MediaPipe Tasks API.
+    using the provided MediaPipe Tasks API detector.
     """
-    base_options = python.BaseOptions(model_asset_path=model_path)
-    options = vision.FaceLandmarkerOptions(
-        base_options=base_options,
-        output_face_blendshapes=False,
-        output_facial_transformation_matrixes=False,
-        num_faces=1
-    )
-    
-    detector = vision.FaceLandmarker.create_from_options(options)
-
     cap = cv2.VideoCapture(video_path)
     frames = []
     
@@ -90,15 +80,4 @@ def extract_lip_frames(video_path, max_frames=75, model_path="face_landmarker.ta
 
     cap.release()
     
-    # Pad or truncate to max_frames
-    if len(frames) == 0:
-        # Fallback if video completely fails or no face ever detected
-        frames = [np.zeros((96, 96, 3), dtype=np.uint8) for _ in range(max_frames)]
-    elif len(frames) > max_frames:
-        frames = frames[:max_frames]
-    else:
-        pad_len = max_frames - len(frames)
-        last_frame = frames[-1]
-        frames.extend([last_frame] * pad_len)
-        
     return frames

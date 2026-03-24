@@ -48,10 +48,13 @@ The `GRIDDataset` loads speaker videos and alignment files.
 
 ### 4. Training & Negative Sampling
 The loss is formulated to maximize the alignment & consistency score for true lip/text pairs and penalize incorrect ones.
-- **Negative Sampler:** At run-time, to construct negative batches without manual annotation, we augment transcripts via:
-  - Completely random wrong transcripts.
-  - Temporally *shuffled* transcripts.
-  - *Phoneme-similar* variants (e.g., substituting visually similar words).
+- **Negative Sampler:** To teach the model what a "mismatch" looks like, we generate a negative sample for every true pair during training by dynamically augmenting the text. Instead of relying purely on completely distinct sentences, we randomly select from 4 strategic distortions to force the model to learn precise temporal and contextual alignments:
+  - **`wrong` / `random`**: Selects a completely random unrelated sentence from the dataset pool. 
+    *(Example: "bin blue at f two now" ➔ "lay red with c nine please")*
+  - **`shuffled`**: Randomizes the word order of the original transcript to force the model to verify temporal sequence alignment rather than just vocabulary presence. 
+    *(Example: "bin blue at f two now" ➔ "now at blue f bin two")*
+  - **`phoneme_similar`**: Selectively replaces a specific word with another valid GRID vocabulary word (such as swapping a color or a letter). This ensures the network must scrutinize visually similar spoken words and cannot cheat by looking at bulk sequence length. 
+    *(Example: "bin blue at f two now" ➔ "bin red at f two now")*
 - **Losses:** We combine **Binary Cross Entropy (BCE)** for the binary verification node, and a **Contrastive Margin Loss** explicitly dictating the internal cross-modal alignment scores to cleanly separate matches from mismatches.
 
 ### 5. Evaluation

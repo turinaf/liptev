@@ -1,4 +1,6 @@
 import os
+os.environ['GLOG_minloglevel'] = '2' # Suppress mediapipe C++ logging
+
 import sys
 # Ensure module resolution across repo
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,6 +12,9 @@ import shutil
 import numpy as np
 import random
 from tqdm import tqdm
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
 from dataset.preprocessing import extract_lip_frames
 from dataset.audio_extraction import extract_audio
@@ -42,12 +47,22 @@ def prepare_dataset(config_path="config.json"):
     raw_dir = config["raw_data_dir"]
     out_dir = config["processed_data_dir"]
     sample_rate = config["audio_sample_rate"]
-    max_frames = config["max_frames"]
     mp_model_path = config["mp_model_path"]
     
     if not os.path.exists(raw_dir):
         print(f"Error: Raw directory '{raw_dir}' does not exist.")
         return
+        
+    # Initialize MediaPipe Face Landmarker ONCE
+    print(f"Initializing MediaPipe Face Landmarker...")
+    base_options = python.BaseOptions(model_asset_path=mp_model_path)
+    options = vision.FaceLandmarkerOptions(
+        base_options=base_options,
+        output_face_blendshapes=False,
+        output_facial_transformation_matrixes=False,
+        num_faces=1
+    )
+    detector = vision.FaceLandmarker.create_from_options(options)
         
     print(f"Scanning '{raw_dir}' for GRID speakers...")
     
@@ -85,7 +100,8 @@ def prepare_dataset(config_path="config.json"):
                 continue
                 
             if not os.path.exists(out_vid_path):
-                cropped_frames = extract_lip_frames(vid_path, max_frames=max_frames, model_path=mp_model_path)
+                # Pass the detector and no longer limit max frames here
+                cropped_frames = extract_lip_frames(vid_path, detector=detector)
                 save_video_from_frames(cropped_frames, out_vid_path, fps=25)
                 
             if not os.path.exists(out_aud_path):

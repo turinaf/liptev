@@ -33,24 +33,65 @@ This repository contains a PyTorch implementation for a Cross-Modal Lip-to-Text 
 
 ---
 
+## 🧠 Model Architecture
+
+```text
+    [Lip Video Frames]                   [Text Transcript]
+     (T x 3 x 96 x 96)                     (Phoneme Seq)
+           │                                    │
+           ▼                                    ▼
+   ┌───────────────────┐               ┌───────────────────┐
+   │   LIP ENCODER     │               │   TEXT ENCODER    │
+   │ ----------------- │               │ ----------------- │
+   │ 1. ResNet18       │               │ 1. Embedding Layer│
+   │ 2. Transformer    │               │ 2. Transformer    │
+   │    Encoder        │               │    Encoder        │
+   └───────────────────┘               └───────────────────┘
+           │                                    │
+           ▼                                    ▼
+   (T x Feature_Dim)                    (L x Feature_Dim)
+           │                                    │
+           └───────────────┐  ┌─────────────────┘
+                           ▼  ▼
+                ┌─────────────────────────┐
+                │ CROSS-MODAL ALIGNMENT   │
+                │ ----------------------- │
+                │ Multi-Head Cross        │
+                │ Attention               │
+                └─────────────────────────┘
+                           │
+                           ▼
+                ┌─────────────────────────┐
+                │    VERIFICATION HEAD    │
+                │ ----------------------- │
+                │ 1. Feature Pooling      │
+                │ 2. Concatenation        │
+                │ 3. MLP + Sigmoid        │
+                └─────────────────────────┘
+                           │
+                           ▼
+                   [Alignment Score]
+                      (0.0 - 1.0)
+```
+
+### Component Breakdown
+1. **Lip Encoder:** Extracts visual speech fragments (visemes) from raw frames. We use a **ResNet18** backbone to learn high-level spatial features for each individual frame. The continuous stream of features is then passed through a **Transformer Encoder** to grasp the sequential temporal context (e.g., mouth opening, transitioning, closing).
+2. **Text Encoder:** Converts raw transcription words into mapped integer phoneme representations. These integers pass through a dense **Embedding Layer** followed by a **Transformer Encoder** to establish linguistic structure and grammatical bounds.
+3. **Cross-Modal Alignment Engine:** Translates between the visual and audio-text modalities. Utilizing **Multi-Head Cross Attention**, the phonemic sequence queries the visual viseme sequence. It identifies *where* and *when* specific vocal sounds occur within the video.
+4. **Verification Head:** Condenses the aligned structural matrix through pooling layers. The combined representations are routed through a Multi-Layer Perceptron (MLP) terminating in a strictly restricted Sigmoid activation, yielding the final alignment probability between `0` (Complete Desync) and `1` (Perfect Alignment).
+
+---
+
 ## ⚙️ Pipeline Overview
 
 ### 1. Data Preprocessing
 The `GRIDDataset` loads speaker videos and alignment files.
 - **Cropping & Sizing:** Videos are actively tracked utilizing MediaPipe's FaceLandmarker, dynamically cropped tightly around the lips, and resized uniformly to `96x96`.
-- **Temporal extraction:** Video lengths are capped/padded to standard frame limits (e.g., 75 bounds) converting into unified PyTorch tensors of shape `(T x C x H x W)`.
-- **Transcript Parsing:** Transcript strings are mapped directly into integer phoneme arrays utilizing the `PhonemeConverter`.
+- **Temporal extraction:** Video lengths are capped/padded to standard frame limits (e.g., 75 bounds) converting into unified PyTorch tensors.
+- **Transcript Parsing:** Transcript strings are mapped dynamically via `PhonemeConverter`.
 
-### 2. Deep Encoders
-- **Lip Encoder:** A pseudo-3D CNN. Extracts spatial features incrementally per frame utilizing a basic ResNet backbone, subsequently mapping the timeline contextally using a Transformer Encoder.
-- **Text Encoder:** Processes exact phonemes through a dense Embedding layer and passes them through an equivalent multi-layer Transformer Encoder.
-
-### 3. Verification & Alignment Engine
-- **Cross-Modal Attention:** Video sequence vectors and Text vectors merge through a localized Cross-Attention module. Phonemes iteratively scan Lip frames, yielding an empirical temporal alignment map.
-- **Verification Score:** The aligned output matrices are pooled, concatenated, and routed through a localized Multi-Layer Perceptron (MLP) mapping dynamically to an alignment consistency probability utilizing Sigmoid activations.
-
-### 4. Training & Negative Sampling
-The loss relies on pushing correct sequences closer and forcing improper texts further away.
+### 2. Training & Negative Sampling
+The loss relies on pushing mathematically correct sequences closer and forcing explicitly mismatched texts away.
 - **Negative Sampler:** To teach the model what a "mismatch" looks like, we generate a negative sample for every true pair during training by dynamically augmenting the text. Instead of relying purely on completely distinct sentences, we randomly select from 3 strategic distortions:
   - **`wrong` / `random`**: Selects a completely random unrelated sentence from the dataset pool. 
     *(Example: "bin blue at f two now" ➔ "lay red with c nine please")*
@@ -58,9 +99,9 @@ The loss relies on pushing correct sequences closer and forcing improper texts f
     *(Example: "bin blue at f two now" ➔ "now at blue f bin two")*
   - **`phoneme_similar`**: Selectively replaces a specific word with another valid GRID vocabulary word (such as swapping a color target). This ensures localized visual scrutiny prevents cheating via contextual sentence lengths. 
     *(Example: "bin blue at f two now" ➔ "bin red at f two now")*
-- **Losses:** We combine **Binary Cross Entropy (BCE)** against a hard certainty boundary, supplemented by a **Contrastive Margin Loss** optimizing explicit interval distance mapping matches away from mismatch traps.
+- **Losses:** We combine **Binary Cross Entropy (BCE)** against a hard classification label, supplemented by a **Contrastive Margin Loss** maximizing explicit structural margins away from mismatch traps.
 
-### 5. Evaluation
+### 3. Evaluation
 Our runtime evaluation tracks:
 - **ROC AUC:** Area under the ROC curve tracking absolute classification separation.
 - **Alignment Accuracy:** Total accuracy thresholding exact temporal metric alignment limits strictly passing 50% probabilities.

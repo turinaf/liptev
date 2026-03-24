@@ -8,6 +8,7 @@ import json
 import cv2
 import shutil
 import numpy as np
+import random
 from tqdm import tqdm
 
 from dataset.preprocessing import extract_lip_frames
@@ -92,6 +93,35 @@ def prepare_dataset(config_path="config.json"):
                 
             if not os.path.exists(out_aln_path):
                 shutil.copy2(src_aln_path, out_aln_path)
+
+    # --- NEW: Splitting Logic ---
+    print("\nCreating Train/Val/Test splits...")
+    all_videos = glob.glob(os.path.join(out_dir, '*', 'video', '*.mp4'))
+    
+    # Randomly shuffle videos
+    random.seed(42) # Set seed for reproducibility
+    random.shuffle(all_videos)
+    
+    total_size = len(all_videos)
+    test_size = max(1, int(total_size * 0.1))
+    val_size = max(1, int(total_size * 0.1))
+    train_size = total_size - val_size - test_size
+    
+    train_videos = all_videos[:train_size]
+    val_videos = all_videos[train_size:train_size + val_size]
+    test_videos = all_videos[train_size + val_size:]
+    
+    with open(os.path.join(out_dir, "train_split.json"), "w") as f:
+        json.dump(train_videos, f)
+    with open(os.path.join(out_dir, "val_split.json"), "w") as f:
+        json.dump(val_videos, f)
+    with open(os.path.join(out_dir, "test_split.json"), "w") as f:
+        json.dump(test_videos, f)
+        
+    print(f"Data split saved in {out_dir}:")
+    print(f" - Train: {len(train_videos)}")
+    print(f" - Val:   {len(val_videos)}")
+    print(f" - Test:  {len(test_videos)}")
 
 if __name__ == "__main__":
     prepare_dataset()

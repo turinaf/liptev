@@ -1,6 +1,5 @@
 import torch
 import os
-import sys
 import json
 from torch.optim import Adam
 from dataset.grid_loader import GRIDDataset
@@ -9,18 +8,24 @@ from utils.negative_sampler import NegativeSampler
 from models.verification_model import LipTextVerificationModel
 from training.train import train_one_epoch
 from evaluation.evaluate import evaluate_model
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 class Config:
     def __init__(self, config_path="config.json"):
-        with open(config_path, 'r') as f:
-            cfg = json.load(f)
+        full_path = os.path.join(os.path.dirname(__file__), config_path)
+        if os.path.exists(full_path):
+            with open(full_path, 'r') as f:
+                cfg = json.load(f)
+        else:
+            cfg = {}
         self.processed_data_dir = cfg.get("processed_data_dir", "./data")
         self.use_audio = cfg.get("use_audio", False)
         self.batch_size = cfg.get("batch_size", 4)
         self.learning_rate = cfg.get("learning_rate", 1e-4)
         self.epochs = cfg.get("epochs", 5)
         self.max_frames = cfg.get("max_frames", 75)
+        self.output_dir = cfg.get("output_dir", "./output")
 
 def collate_fn(batch):
     converter = PhonemeConverter()
@@ -38,10 +43,9 @@ def collate_fn(batch):
     for item in batch:
         vid = item['video']
         trans = item['transcript']
-        if use_audio:
-            aud = item['audio']
+        if use_audio: aud = item['audio']
         
-        # --- Positive Sample ---
+        # Positive
         videos.append(vid)
         p_seq = converter.text_to_phonemes(trans)
         p_seq = p_seq[:30] + [0] * max(0, 30 - len(p_seq))
@@ -50,7 +54,7 @@ def collate_fn(batch):
         transcripts.append(trans)
         if use_audio: audios.append(aud)
         
-        # --- Negative Sample ---
+        # Negative
         neg_trans = sampler.sample(trans)
         videos.append(vid)
         n_seq = converter.text_to_phonemes(neg_trans)
@@ -58,8 +62,7 @@ def collate_fn(batch):
         phonemes.append(torch.tensor(n_seq))
         labels.append(0.0)
         transcripts.append(neg_trans)
-        # Note: audio remains the SAME for the negative text sample since text is what mismatches 
-        if use_audio: audios.append(aud)
+        if use_audio: audios.append(aud) 
         
     ret = {
         'video': torch.stack(videos),
@@ -68,50 +71,81 @@ def collate_fn(batch):
         'transcripts': transcripts
     }
     
-    if use_audio:
-        ret['audio'] = torch.stack(audios)
-        
+    if use_audio: ret['audio'] = torch.stack(audios)
     return ret
 
 def main():
     cfg = Config("config.json")
     
+    # Properly construct directories using output path tracking
+    proj_root = os.path.dirname(__file__)
+    output_dir_abs = os.path.join(proj_root, cfg.output_dir)
+    os.makedirs(output_dir_abs, exist_ok=True)
+    
+    # TensorBoard initialization
+    writer = SummaryWriter(log_dir=os.path.join(output_dir_abs, "logs"))
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    dataset_path = os.path.abspath(cfg.processed_data_dir)
+    dataset_path = os.path.abspath(os.path.join(proj_root, cfg.processed_data_dir))
     
     if not os.path.exists(dataset_path) or len(os.listdir(dataset_path)) == 0:
-        raise ValueError(f"Processed dataset directory ({dataset_path}) is missing. Please run pipeline/data_preparation.py first.")
+        raise ValueError(f"Processed dataset directory ({dataset_path}) is missing. Run preparation pipeline first.")
         
-    full_dataset = GRIDDataset(data_dir=dataset_path, split='train', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+    print(f"Loading data from {dataset_path}...")
     
-    if len(full_dataset) == 0:
-        raise ValueError(f"No samples were found in {dataset_path}. Did you run preparation script?")
-        
+    # Load separate datasets using precomputed lists
+    train_dataset = GRIDDataset(data_dir=dataset_path, split='train', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+    val_dataset = GRIDDataset(data_dir=dataset_path, split='val', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+    test_dataset = GRIDDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+    
+    print(f"Splits Loaded -> Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
+    
+    train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
+    
     print("Initializing model...")
-    # NOTE: The current LipTextVerificationModel uses only video/text. If `cfg.use_audio` is True, 
-    # you would need an audio encoder integrated into your forward pass later.
     model = LipTextVerificationModel(vocab_size=50, feature_dim=256).to(device)
-    
-    val_size = max(1, int(len(full_dataset) * 0.1))
-    train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
-    
-    print(f"Training on {len(train_dataset)} samples, Validating on {len(val_dataset)} samples.")
-    
-    train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=2)
-    
     optimizer = Adam(model.parameters(), lr=cfg.learning_rate)
     
-    print("\nStarting training...")
+    best_val_auc = 0.0
+    model_save_path = os.path.join(output_dir_abs, "best_lip_verification_model.pth")
+    
+    print("\n[--- Starting Training ---]")
     for epoch in range(1, cfg.epochs + 1):
-        loss = train_one_epoch(model, train_loader, optimizer, device)
+        loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer=writer)
         print(f"Epoch {epoch} | Train Loss: {loss:.4f}")
         
-    print("\nEvaluating Model on Validation Set...")
-    evaluate_model(model, val_loader, device)
+        # Validation
+        print(f"Evaluating Model on Validation Set (Epoch {epoch})...")
+        val_metrics = evaluate_model(model, val_loader, device)
+        
+        writer.add_scalar('Metrics/val_roc_auc', val_metrics['roc_auc'], epoch)
+        writer.add_scalar('Metrics/val_verify_acc', val_metrics['verification_accuracy'], epoch)
+        
+        # Model Checkpoint Condition
+        if val_metrics['roc_auc'] > best_val_auc:
+            best_val_auc = val_metrics['roc_auc']
+            torch.save(model.state_dict(), model_save_path)
+            print(f"--> Saved new BEST model with AUC {best_val_auc:.4f} to {model_save_path}")
+
+    print("\n[--- Testing Phase ---]")
+    print(f"Reloading best weights from {model_save_path}")
+    if os.path.exists(model_save_path):
+        model.load_state_dict(torch.load(model_save_path, map_location=device))
+        print("Evaluating Model on Hold-out Test Set...")
+        test_metrics = evaluate_model(model, test_loader, device)
+        
+        writer.add_scalar('Metrics/test_roc_auc', test_metrics['roc_auc'], 1)
+        writer.add_scalar('Metrics/test_verify_acc', test_metrics['verification_accuracy'], 1)
+        print(f"Final Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f}")
+    else:
+        print("Warning: Model failed to save correctly during runtime. Skipping testing.")
+        
+    writer.close()
+    print(f"Complete! Logs can be read using 'tensorboard --logdir={os.path.join(output_dir_abs, 'logs')}'")
 
 if __name__ == "__main__":
     main()

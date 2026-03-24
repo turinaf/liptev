@@ -17,7 +17,7 @@ def evaluate_model(model, dataloader, device):
     all_aligns = torch.cat(all_aligns)
     all_labels = torch.cat(all_labels)
     
-    from .metrics import compute_metrics
+    from evaluation.metrics import compute_metrics
     metrics = compute_metrics(all_labels, all_scores, all_aligns)
     
     print(f"ROC AUC: {metrics['roc_auc']:.4f}, Verify Acc: {metrics['verification_accuracy']:.4f}, Align Acc: {metrics['alignment_accuracy']:.4f}")

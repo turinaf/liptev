@@ -10,8 +10,9 @@ import torchvision.transforms as T
 class GRIDDataset(Dataset):
     def __init__(self, data_dir, split='train', max_frames=75, transform=None, use_audio=False):
         """
-        Loads the preprocessed GRID dataset.
-        data_dir should point to the processed directory (e.g. ./data) containing sX/video, sX/audio, sX/align
+        Loads the preprocessed GRID dataset using pre-computed split files.
+        data_dir should point to the processed directory (e.g. ./data) containing 
+        the train_split.json, val_split.json, and test_split.json manifests.
         """
         self.data_dir = data_dir
         self.split = split
@@ -25,9 +26,16 @@ class GRIDDataset(Dataset):
 
     def _load_dataset_paths(self):
         samples = []
-        # Find all precomputed .mp4 files
-        video_paths = glob.glob(os.path.join(self.data_dir, '*', 'video', '*.mp4'))
         
+        split_file = os.path.join(self.data_dir, f"{self.split}_split.json")
+        
+        if not os.path.exists(split_file):
+            print(f"Warning: Split file {split_file} not found. Please run pipeline/data_preparation.py first.")
+            return []
+            
+        with open(split_file, "r") as f:
+            video_paths = json.load(f)
+            
         for vid_path in video_paths:
             base_name = os.path.basename(vid_path).replace('.mp4', '')
             speaker_dir = os.path.dirname(os.path.dirname(vid_path))
@@ -52,6 +60,7 @@ class GRIDDataset(Dataset):
                         sample_dict["audio"] = audio_path
                         
                     samples.append(sample_dict)
+                    
         return samples
 
     def _read_align_file(self, align_path):

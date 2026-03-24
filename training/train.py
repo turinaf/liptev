@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 
-def train_one_epoch(model, dataloader, optimizer, device):
+def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None):
     model.train()
     bce_loss_fn = nn.BCELoss()
-    triplet_loss_fn = nn.TripletMarginLoss(margin=1.0)
+    # triplet_loss_fn = nn.TripletMarginLoss(margin=1.0)
     
     total_loss = 0.0
     
-    for batch in dataloader:
+    for batch_idx, batch in enumerate(dataloader):
         video = batch['video'].to(device)
         phonemes = batch['phonemes'].to(device)
         labels = batch['label'].to(device) # 1 For match, 0 for negative samples
@@ -33,4 +33,11 @@ def train_one_epoch(model, dataloader, optimizer, device):
         
         total_loss += loss.item()
         
+        # Log to tensorboard step by step
+        if writer is not None:
+            global_step = (epoch - 1) * len(dataloader) + batch_idx
+            writer.add_scalar('Loss/train_step_bce', loss_bce.item(), global_step)
+            writer.add_scalar('Loss/train_step_contrastive', loss_contrastive.item(), global_step)
+            writer.add_scalar('Loss/train_step_total', loss.item(), global_step)
+            
     return total_loss / len(dataloader)

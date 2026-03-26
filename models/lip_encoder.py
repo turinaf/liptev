@@ -5,10 +5,31 @@ import torchvision.models as models
 class LipEncoder(nn.Module):
     def __init__(self, feature_dim=256):
         super(LipEncoder, self).__init__()
-        # 3D CNN approx: ResNet for spatial, followed by Transformer for temporal
-        self.spatial_encoder = models.resnet18(pretrained=False)
-        self.spatial_encoder.fc = nn.Linear(self.spatial_encoder.fc.in_features, feature_dim)
         
+        # 1. 3D Spatio-Temporal Front-End
+        # Captures short-term dynamics. Stride=1 for time to keep sequence length T intact.
+        self.frontend3D = nn.Sequential(
+            nn.Conv3d(in_channels=3, out_channels=64, kernel_size=(5, 7, 7), 
+                      stride=(1, 2, 2), padding=(2, 3, 3), bias=False),
+            nn.BatchNorm3d(64),
+            nn.ReLU(True),
+            nn.MaxPool3d(kernel_size=(1, 3, 3), stride=(1, 2, 2), padding=(0, 1, 1))
+        )
+        
+        # 2. 2D Spatial Backbone (ResNet18)
+        # We strip the default conv1 and maxpool from ResNet since our 3D frontend does that now
+        resnet = models.resnet18(weights=None)
+        self.resnet2D = nn.Sequential(
+            resnet.layer1,
+            resnet.layer2,
+            resnet.layer3,
+            resnet.layer4,
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+        
+        self.fc = nn.Linear(512, feature_dim)
+        
+        # 3. Temporal Back-End
         self.temporal_encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(d_model=feature_dim, nhead=4, batch_first=True),
             num_layers=2
@@ -17,10 +38,26 @@ class LipEncoder(nn.Module):
     def forward(self, x):
         # x: B x T x C x H x W
         B, T, C, H, W = x.shape
-        x = x.view(B * T, C, H, W)
         
-        spatial_feats = self.spatial_encoder(x) # (B*T) x D
-        spatial_feats = spatial_feats.view(B, T, -1) # B x T x D
+        # PyTorch Conv3d expects inputs of shape (B, C, Time, H, W)
+        x = x.transpose(1, 2) 
         
-        temporal_feats = self.temporal_encoder(spatial_feats) # B x T x D
+        # Spatio-Temporal feature extraction
+        x = self.frontend3D(x) # Output: B x 64 x T x H' x W'
+        
+        # Prepare for 2D ResNet: Merge Batch and Time
+        B, C_out, T, H_out, W_out = x.shape
+        x = x.transpose(1, 2).contiguous().view(B * T, C_out, H_out, W_out)
+        
+        # Deep Spatial extraction
+        spatial_feats = self.resnet2D(x) # (B*T) x 512 x 1 x 1
+        spatial_feats = spatial_feats.view(B * T, -1) # (B*T) x 512
+        
+        # Projection
+        spatial_feats = self.fc(spatial_feats) # (B*T) x feature_dim
+        spatial_feats = spatial_feats.view(B, T, -1) # B x T x feature_dim
+        
+        # Long-term Context over sequence
+        temporal_feats = self.temporal_encoder(spatial_feats) # B x T x feature_dim
+        
         return temporal_feats

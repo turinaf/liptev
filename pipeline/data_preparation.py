@@ -68,7 +68,16 @@ def prepare_dataset(config_path="config.json"):
     
     speakers = [d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d))]
     
+    # --- ADD COMLETED SPEAKER FOLDERS HERE ---
+    # e.g., skip_speakers = ["s1", "s2", "s3"]
+    skip_speakers = ["s14_processed", "s9_processed", "s27_processed", "s22_processed", 
+                     "s1_processed", " s29_processed", "s18_processed"] 
+    
     for speaker in speakers:
+        if speaker in skip_speakers:
+            print(f"Skipping speaker {speaker} (already processed completely).")
+            continue
+            
         print(f"Processing speaker: {speaker}")
         speaker_raw_dir = os.path.join(raw_dir, speaker)
         speaker_out_dir = os.path.join(out_dir, speaker)
@@ -99,10 +108,16 @@ def prepare_dataset(config_path="config.json"):
             if not os.path.exists(src_aln_path):
                 continue
                 
+            # Skip video explicitly if it's already completely extracted
+            if os.path.exists(out_vid_path) and os.path.exists(out_aln_path):
+                continue
+                
             if not os.path.exists(out_vid_path):
-                # Pass the detector and no longer limit max frames here
                 cropped_frames = extract_lip_frames(vid_path, detector=detector)
-                save_video_from_frames(cropped_frames, out_vid_path, fps=25)
+                if cropped_frames:
+                    save_video_from_frames(cropped_frames, out_vid_path, fps=25)
+                else:
+                    continue
                 
             if not os.path.exists(out_aud_path):
                 extract_audio(vid_path, out_aud_path, sample_rate=sample_rate)
@@ -110,12 +125,10 @@ def prepare_dataset(config_path="config.json"):
             if not os.path.exists(out_aln_path):
                 shutil.copy2(src_aln_path, out_aln_path)
 
-    # --- NEW: Splitting Logic ---
     print("\nCreating Train/Val/Test splits...")
     all_videos = glob.glob(os.path.join(out_dir, '*', 'video', '*.mp4'))
     
-    # Randomly shuffle videos
-    random.seed(42) # Set seed for reproducibility
+    random.seed(42) 
     random.shuffle(all_videos)
     
     total_size = len(all_videos)

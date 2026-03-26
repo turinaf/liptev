@@ -20,6 +20,8 @@ class GRIDDataset(Dataset):
         self.use_audio = use_audio
         self.transform = transform or T.Compose([
             T.ToTensor(),
+              # Normalizes from [0, 1] to [-1, 1] generically safely
+            T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
         
         self.samples = self._load_dataset_paths()
@@ -109,7 +111,7 @@ class GRIDDataset(Dataset):
 
     def _load_audio(self, path):
         # returns simple raw audio form (can be expanded to mel spectrograms depending on audio features)
-        waveform, sr = torchaudio.load(path)
+        waveform, sr = torchaudio.load(..., backend="ffmpeg" if torchaudio.get_audio_backend() else None)(path)
         # Flatten and truncate / pad to standard length depending on implementation
         # For ~3 seconds of 16kHz audio = 48000 samples
         target_len = sr * 3 
@@ -138,3 +140,24 @@ class GRIDDataset(Dataset):
             ret_dict["audio"] = audio_tensor
             
         return ret_dict
+
+if __name__ == "__main__":
+    from torch.utils.data import DataLoader
+    
+    print("Initializing GRIDDataset in 'train' split...")
+    # Adjust 'data_dir' to the actual preprocessed dataset path
+    dataset = GRIDDataset(data_dir="./data", split="train", max_frames=75, use_audio=True)
+    
+    print(f"Dataset length: {len(dataset)}")
+    
+    if len(dataset) > 0:
+        dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
+        batch = next(iter(dataloader))
+        
+        print("\n--- Sample Batch Info ---")
+        print(f"Video batch shape (B, T, C, H, W): {batch['video'].shape}")
+        print(f"Transcripts: {batch['transcript']}")
+        if "audio" in batch:
+            print(f"Audio batch shape (B, channels, samples): {batch['audio'].shape}")
+    else:
+        print("Dataset is empty. Ensure data is correctly preprocessed and paths are valid.")

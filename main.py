@@ -1,6 +1,10 @@
 import torch
 import os
 import json
+import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim import Adam
 from dataset.grid_loader import GRIDDataset
 from utils.phoneme_converter import PhonemeConverter
@@ -75,77 +79,115 @@ def collate_fn(batch):
     return ret
 
 def main():
+    # --- DDP Initialization ---
+    is_distributed = "LOCAL_RANK" in os.environ
+    if is_distributed:
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        is_main_process = (local_rank == 0)
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        is_main_process = True
+        local_rank = 0
+
     cfg = Config("config.json")
-    
-    # Properly construct directories using output path tracking
     proj_root = os.path.dirname(__file__)
     output_dir_abs = os.path.join(proj_root, cfg.output_dir)
-    os.makedirs(output_dir_abs, exist_ok=True)
     
-    # TensorBoard initialization
-    writer = SummaryWriter(log_dir=os.path.join(output_dir_abs, "logs"))
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    writer = None
+    if is_main_process:
+        os.makedirs(output_dir_abs, exist_ok=True)
+        writer = SummaryWriter(log_dir=os.path.join(output_dir_abs, "logs"))
+        print(f"Using device: {device} | Distributed: {is_distributed}")
     
     dataset_path = os.path.abspath(os.path.join(proj_root, cfg.processed_data_dir))
     
     if not os.path.exists(dataset_path) or len(os.listdir(dataset_path)) == 0:
-        raise ValueError(f"Processed dataset directory ({dataset_path}) is missing. Run preparation pipeline first.")
+        if is_main_process:
+            print(f"Error: Processed dataset directory ({dataset_path}) is missing.")
+        return
         
-    print(f"Loading data from {dataset_path}...")
-    
-    # Load separate datasets using precomputed lists
     train_dataset = GRIDDataset(data_dir=dataset_path, split='train', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
     val_dataset = GRIDDataset(data_dir=dataset_path, split='val', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
     test_dataset = GRIDDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
     
-    print(f"Splits Loaded -> Train: {len(train_dataset)} | Val: {len(val_dataset)} | Test: {len(test_dataset)}")
+    if is_main_process:
+        print(f"Splits Loaded -> Train: {len(train_dataset)} | Val: {len(val_dataset)}")
     
-    train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=collate_fn)
+    # --- Distributed Samplers ---
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
+    
+    # Validation/Test do not use DistributedSampler here to keep evaluation full and simple on all GPUs.
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=cfg.batch_size, 
+        shuffle=(train_sampler is None), 
+        sampler=train_sampler, 
+        collate_fn=collate_fn
+    )
     val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
     
-    print("Initializing model...")
+    if is_main_process: print("Initializing model...")
     model = LipTextVerificationModel(vocab_size=50, feature_dim=256).to(device)
-    optimizer = Adam(model.parameters(), lr=cfg.learning_rate)
     
+    # --- Wrap Model in DDP ---
+    if is_distributed:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        
+    optimizer = Adam(model.parameters(), lr=cfg.learning_rate)
     best_val_auc = 0.0
     model_save_path = os.path.join(output_dir_abs, "best_lip_verification_model.pth")
     
-    print("\n[--- Starting Training ---]")
+    if is_main_process: print("
+[--- Starting Training ---]")
     for epoch in range(1, cfg.epochs + 1):
-        loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer=writer)
-        print(f"Epoch {epoch} | Train Loss: {loss:.4f}")
+        if is_distributed:
+            # Important: Ensures shuffling depends on epoch
+            train_sampler.set_epoch(epoch)
+            
+        # Only pass writer to rank 0 to avoid multiple tqdm/tensorboard writes
+        loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer=writer if is_main_process else None)
         
-        # Validation
-        print(f"Evaluating Model on Validation Set (Epoch {epoch})...")
+        if is_main_process:
+            print(f"Epoch {epoch} | Train Loss: {loss:.4f}")
+            print(f"Evaluating Model on Validation Set (Epoch {epoch})...")
+            
         val_metrics = evaluate_model(model, val_loader, device)
         
-        writer.add_scalar('Metrics/val_roc_auc', val_metrics['roc_auc'], epoch)
-        writer.add_scalar('Metrics/val_verify_acc', val_metrics['verification_accuracy'], epoch)
-        
-        # Model Checkpoint Condition
-        if val_metrics['roc_auc'] > best_val_auc:
-            best_val_auc = val_metrics['roc_auc']
-            torch.save(model.state_dict(), model_save_path)
-            print(f"--> Saved new BEST model with AUC {best_val_auc:.4f} to {model_save_path}")
+        if is_main_process:
+            writer.add_scalar('Metrics/val_roc_auc', val_metrics['roc_auc'], epoch)
+            writer.add_scalar('Metrics/val_verify_acc', val_metrics['verification_accuracy'], epoch)
+            
+            if val_metrics['roc_auc'] > best_val_auc:
+                best_val_auc = val_metrics['roc_auc']
+                torch.save(model.module.state_dict() if is_distributed else model.state_dict(), model_save_path)
+                print(f"--> Saved new BEST model with AUC {best_val_auc:.4f} to {model_save_path}")
 
-    print("\n[--- Testing Phase ---]")
-    print(f"Reloading best weights from {model_save_path}")
-    if os.path.exists(model_save_path):
-        model.load_state_dict(torch.load(model_save_path, map_location=device))
-        print("Evaluating Model on Hold-out Test Set...")
-        test_metrics = evaluate_model(model, test_loader, device)
-        
-        writer.add_scalar('Metrics/test_roc_auc', test_metrics['roc_auc'], 1)
-        writer.add_scalar('Metrics/test_verify_acc', test_metrics['verification_accuracy'], 1)
-        print(f"Final Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f}")
-    else:
-        print("Warning: Model failed to save correctly during runtime. Skipping testing.")
-        
-    writer.close()
-    print(f"Complete! Logs can be read using 'tensorboard --logdir={os.path.join(output_dir_abs, 'logs')}'")
+    if is_main_process:
+        print("
+[--- Testing Phase ---]")
+        if os.path.exists(model_save_path):
+            state_dict = torch.load(model_save_path, map_location=device)
+            if is_distributed:
+                model.module.load_state_dict(state_dict)
+            else:
+                model.load_state_dict(state_dict)
+                
+            print("Evaluating Model on Hold-out Test Set...")
+            test_metrics = evaluate_model(model, test_loader, device)
+            
+            writer.add_scalar('Metrics/test_roc_auc', test_metrics['roc_auc'], 1)
+            writer.add_scalar('Metrics/test_verify_acc', test_metrics['verification_accuracy'], 1)
+            print(f"Final Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f}")
+            
+        writer.close()
+        print("Complete!")
+
+    if is_distributed:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()

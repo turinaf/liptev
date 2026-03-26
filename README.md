@@ -133,7 +133,7 @@ This procedure actively constructs scaled `96x96` mp4 chunked archives, synchron
 ### 2. Running the End-to-End Pipeline
 Once the `processed` data directory is populated, you can run the full pipeline encompassing training splits, batch evaluations, and validation outputs simply by running:
 ```bash
-python main.py
+`torchrun --nproc_per_node=2 main.py`
 ```
 
 ### 3. Example Inference Output

@@ -130,7 +130,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
     test_loader = DataLoader(test_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
     
-    if is_main_process: print("Initializing model...")
+    if is_main_process: print(r"Initializing model...")
     model = LipTextVerificationModel(vocab_size=50, feature_dim=256).to(device)
     
     # --- Wrap Model in DDP ---
@@ -141,8 +141,7 @@ def main():
     best_val_auc = 0.0
     model_save_path = os.path.join(output_dir_abs, "best_lip_verification_model.pth")
     
-    if is_main_process: print("
-[--- Starting Training ---]")
+    if is_main_process: print(r"[--- Starting Training ---]")
     for epoch in range(1, cfg.epochs + 1):
         if is_distributed:
             # Important: Ensures shuffling depends on epoch
@@ -167,8 +166,7 @@ def main():
                 print(f"--> Saved new BEST model with AUC {best_val_auc:.4f} to {model_save_path}")
 
     if is_main_process:
-        print("
-[--- Testing Phase ---]")
+        print("\n[--- Testing Phase ---]")
         if os.path.exists(model_save_path):
             state_dict = torch.load(model_save_path, map_location=device)
             if is_distributed:
@@ -191,3 +189,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

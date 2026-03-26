@@ -23,13 +23,13 @@ class Config:
                 cfg = json.load(f)
         else:
             cfg = {}
-        self.processed_data_dir = cfg.get("processed_data_dir", "./data")
-        self.use_audio = cfg.get("use_audio", False)
-        self.batch_size = cfg.get("batch_size", 4)
-        self.learning_rate = cfg.get("learning_rate", 1e-4)
-        self.epochs = cfg.get("epochs", 5)
-        self.max_frames = cfg.get("max_frames", 75)
-        self.output_dir = cfg.get("output_dir", "./output")
+        self.processed_data_dir = cfg.get("processed_data_dir")
+        self.use_audio = cfg.get("use_audio")
+        self.batch_size = cfg.get("batch_size")
+        self.learning_rate = cfg.get("learning_rate")
+        self.epochs = cfg.get("epochs")
+        self.max_frames = cfg.get("max_frames")
+        self.output_dir = cfg.get("output_dir")
 
 def collate_fn(batch):
     converter = PhonemeConverter()
@@ -135,7 +135,7 @@ def main():
     
     # --- Wrap Model in DDP ---
     if is_distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
         
     optimizer = Adam(model.parameters(), lr=cfg.learning_rate)
     best_val_auc = 0.0

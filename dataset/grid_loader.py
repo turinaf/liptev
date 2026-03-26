@@ -4,7 +4,6 @@ import torch
 import cv2
 import json
 import torchaudio
-import torchcodec
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 
@@ -112,9 +111,7 @@ class GRIDDataset(Dataset):
 
     def _load_audio(self, path):
         # returns simple raw audio form
-        decoder = torchcodec.decoders.AudioDecoder(path)
-        waveform = decoder[:] # Read the entire audio
-        sr = decoder.sample_rate
+        waveform, sr = torchaudio.load(path, backend="ffmpeg")
         
         # Flatten and truncate / pad to standard length depending on implementation
         # For ~3 seconds of 16kHz audio = 48000 samples

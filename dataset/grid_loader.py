@@ -111,7 +111,7 @@ class GRIDDataset(Dataset):
 
     def _load_audio(self, path):
         # returns simple raw audio form (can be expanded to mel spectrograms depending on audio features)
-        waveform, sr = torchaudio.load(..., backend="ffmpeg" if torchaudio.get_audio_backend() else None)(path)
+        waveform, sr = torchaudio.load(path, backend="ffmpeg" if torchaudio.get_audio_backend() else None)
         # Flatten and truncate / pad to standard length depending on implementation
         # For ~3 seconds of 16kHz audio = 48000 samples
         target_len = sr * 3 

@@ -7,5 +7,6 @@
     "mp_model_path": "face_landmarker.task",
     "batch_size": 32,
     "learning_rate": 0.0001,
-    "epochs": 100
+    "epochs": 100,
+    "output_dir": "./output"
 }

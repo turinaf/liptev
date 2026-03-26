@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 
@@ -8,7 +9,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None):
     
     total_loss = 0.0
     
-    for batch_idx, batch in enumerate(dataloader):
+    pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch} Training")
+    for batch_idx, batch in pbar:
         video = batch['video'].to(device)
         phonemes = batch['phonemes'].to(device)
         labels = batch['label'].to(device) # 1 For match, 0 for negative samples
@@ -39,5 +41,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None):
             writer.add_scalar('Loss/train_step_bce', loss_bce.item(), global_step)
             writer.add_scalar('Loss/train_step_contrastive', loss_contrastive.item(), global_step)
             writer.add_scalar('Loss/train_step_total', loss.item(), global_step)
+        
+        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
             
     return total_loss / len(dataloader)

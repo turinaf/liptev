@@ -4,6 +4,7 @@ import torch
 import cv2
 import json
 import torchaudio
+import torchcodec
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 
@@ -110,8 +111,11 @@ class GRIDDataset(Dataset):
         return torch.stack(tensor_list)
 
     def _load_audio(self, path):
-        # returns simple raw audio form (can be expanded to mel spectrograms depending on audio features)
-        waveform, sr = torchaudio.load(path, backend="ffmpeg" if torchaudio.get_audio_backend() else None)
+        # returns simple raw audio form
+        decoder = torchcodec.decoders.AudioDecoder(path)
+        waveform = decoder[:] # Read the entire audio
+        sr = decoder.sample_rate
+        
         # Flatten and truncate / pad to standard length depending on implementation
         # For ~3 seconds of 16kHz audio = 48000 samples
         target_len = sr * 3 
@@ -121,7 +125,6 @@ class GRIDDataset(Dataset):
             pad = target_len - waveform.shape[1]
             waveform = torch.nn.functional.pad(waveform, (0, pad))
         return waveform
-
     def __len__(self):
         return len(self.samples)
 

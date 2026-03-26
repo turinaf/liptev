@@ -146,7 +146,7 @@ if __name__ == "__main__":
     
     print("Initializing GRIDDataset in 'train' split...")
     # Adjust 'data_dir' to the actual preprocessed dataset path
-    dataset = GRIDDataset(data_dir="./data", split="train", max_frames=75, use_audio=True)
+    dataset = GRIDDataset(data_dir="./data", split="train", max_frames=75, use_audio=False)
     
     print(f"Dataset length: {len(dataset)}")
     

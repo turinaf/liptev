@@ -1,7 +1,7 @@
 {
-    "raw_data_dir": "./raw_data",
+    "raw_data_dir": "./data",
     "processed_data_dir": "./data",
-    "use_audio": true,
+    "use_audio": false,
     "audio_sample_rate": 16000,
     "max_frames": 75,
     "mp_model_path": "face_landmarker.task",

@@ -141,8 +141,35 @@ def main():
     best_val_auc = 0.0
     model_save_path = os.path.join(output_dir_abs, "best_lip_verification_model.pth")
     
+
+    # --- Checkpoint Resuming logic ---
+    start_epoch = 1
+    checkpoint_pattern = os.path.join(output_dir_abs, "checkpoint_epoch_*.pth")
+    import glob
+    checkpoints = glob.glob(checkpoint_pattern)
+    
+    if checkpoints:
+        # Find latest epoch
+        checkpoints.sort(key=lambda x: int(x.split("_epoch_")[-1].split(".pth")[0]))
+        latest_checkpoint = checkpoints[-1]
+        
+        if is_main_process:
+            print(f"Loading checkpoint {latest_checkpoint} to resume training...")
+            
+        chk_state = torch.load(latest_checkpoint, map_location=device)
+        
+        # Load weights
+        if is_distributed:
+            model.module.load_state_dict(chk_state['model_state_dict'])
+        else:
+            model.load_state_dict(chk_state['model_state_dict'])
+            
+        optimizer.load_state_dict(chk_state['optimizer_state_dict'])
+        start_epoch = chk_state['epoch'] + 1
+        best_val_auc = chk_state.get('best_val_auc', 0.0)
+    
     if is_main_process: print(r"[--- Starting Training ---]")
-    for epoch in range(1, cfg.epochs + 1):
+    for epoch in range(start_epoch, cfg.epochs + 1):
         if is_distributed:
             # Important: Ensures shuffling depends on epoch
             train_sampler.set_epoch(epoch)
@@ -164,6 +191,17 @@ def main():
                 best_val_auc = val_metrics['roc_auc']
                 torch.save(model.module.state_dict() if is_distributed else model.state_dict(), model_save_path)
                 print(f"--> Saved new BEST model with AUC {best_val_auc:.4f} to {model_save_path}")
+            
+            # Save generic checkpoint for resuming
+            checkpoint_path = os.path.join(output_dir_abs, f"checkpoint_epoch_{epoch}.pth")
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.module.state_dict() if is_distributed else model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_val_auc': best_val_auc
+            }, checkpoint_path)
+            print(f"--> Saved Checkpoint to {checkpoint_path}")
+
 
     if is_main_process:
         print("\n[--- Testing Phase ---]")

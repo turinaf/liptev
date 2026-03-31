@@ -1,7 +1,45 @@
+import re
+import nltk
+nltk.download('averaged_perceptron_tagger_eng')
 class PhonemeConverter:
     def __init__(self):
-        # A full vocabulary would map english phonemes. This represents characters/phonemes dict.
-        self.vocab = {"<pad>": 0, "b": 1, "i": 2, "n": 3, "l": 4, "u": 5, "a": 6, "t": 7, "f": 8, "w": 9, "o": 10}
-        
+        try:
+            from g2p_en import G2p
+            self.g2p = G2p()
+        except ImportError:
+            raise ImportError("pip install g2p_en")
+
+        arpabet = [
+            "<pad>", "<unk>",
+            "AA","AE","AH","AO","AW","AY",
+            "B","CH","D","DH","EH","ER","EY",
+            "F","G","HH","IH","IY","JH","K","L",
+            "M","N","NG","OW","OY","P","R","S",
+            "SH","T","TH","UH","UW","V","W","Y","Z","ZH"
+        ]
+
+        self.vocab = {p:i for i,p in enumerate(arpabet)}
+
+    def normalize_text(self, text):
+        text = text.lower()
+        text = re.sub(r'[^a-z0-9\s]', ' ', text)
+        return text
+
+    def remove_stress(self, phoneme):
+        return ''.join([c for c in phoneme if not c.isdigit()])
+
     def text_to_phonemes(self, text):
-        return [self.vocab.get(c, 0) for c in text.replace(" ", "")]
+        text = self.normalize_text(text)
+        phonemes = self.g2p(text)
+
+        indices = []
+
+        for p in phonemes:
+            base = self.remove_stress(p)
+            indices.append(self.vocab.get(base, self.vocab["<unk>"]))
+
+        return phonemes, indices
+
+    @property
+    def vocab_size(self):
+        return len(self.vocab)

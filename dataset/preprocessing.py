@@ -1,9 +1,6 @@
 import cv2
 import numpy as np
 import mediapipe as mp
-import matplotlib.pyplot as plt
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
 
 LIP_LANDMARKS = [
     61,146,91,181,84,17,314,405,321,375,291,

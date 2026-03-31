@@ -131,7 +131,7 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
     
     if is_main_process: print(r"Initializing model...")
-    model = LipTextVerificationModel(vocab_size=50, feature_dim=256).to(device)
+    model = LipTextVerificationModel(vocab_size=75, feature_dim=256).to(device)
     
     # --- Wrap Model in DDP ---
     if is_distributed:

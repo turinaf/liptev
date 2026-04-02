@@ -107,6 +107,12 @@ def collate_fn_factory(dataset_name):
             
         return batch_dict
     return collate_fn
+    # Backwards compatibility: expose a default collate_fn and Config for test scripts
+    try:
+        _cfg_for_test = Config()
+        collate_fn = collate_fn_factory(_cfg_for_test.dataset)
+    except Exception:
+        collate_fn = None
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'

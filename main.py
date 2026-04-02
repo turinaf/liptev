@@ -166,12 +166,12 @@ def main():
         train_sampler.set_epoch(epoch)
         train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None)
         
-        val_loss, val_acc = evaluate_model(model, val_loader, device)
+        metrics = evaluate_model(model, val_loader, device)
         
         if local_rank == 0:
-            print(f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
-            writer.add_scalar('Loss/val', val_loss, epoch)
-            writer.add_scalar('Accuracy/val', val_acc, epoch)
+            print(f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | Val ROC AUC: {metrics["roc_auc"]:.4f} | Val Ver Acc: {metrics["verification_accuracy"]:.4f}")
+            writer.add_scalar('Logic/roc_auc', metrics["roc_auc"], epoch)
+            writer.add_scalar('Accuracy/verify', metrics["verification_accuracy"], epoch)
             
             # Save checkpoint
             torch.save(model.module.state_dict(), os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"))

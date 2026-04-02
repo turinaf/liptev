@@ -24,7 +24,7 @@ class Config:
                 cfg = json.load(f)
         else:
             cfg = {}
-        self.dataset = cfg.get("dataset")
+        self.dataset = cfg.get("dataset", "grid")
         self.processed_data_dir = cfg.get("digit_processed_data_dir") if self.dataset == "digit" else cfg.get("grid_processed_data_dir")
         self.use_audio = cfg.get("use_audio")
         self.batch_size = cfg.get("batch_size")
@@ -34,8 +34,10 @@ class Config:
         self.output_dir = cfg.get("output_dir")
 
 def collate_fn_factory(dataset_name):
+    # Initialize these ONCE outside the collate_fn to avoid repeated downloads and instantiation
+    converter = PhonemeConverter() if dataset_name != "digit" else None
+    
     def collate_fn(batch):
-        converter = PhonemeConverter()
         all_trans = [item['transcript'] for item in batch]
         sampler = NegativeSampler(all_trans)
         
@@ -104,11 +106,21 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def main(rank, world_size):
-    setup(rank, world_size)
+def main():
+    # Detect if spawned via torchrun
+    if "LOCAL_RANK" in os.environ:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        dist.init_process_group("nccl")
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        # Standalone spawn logic
+        setup(0, 1)
+        local_rank = 0
+        world_size = 1
+        device = torch.device("cuda:0")
+
     config = Config()
-    
-    device = torch.device(f"cuda:{rank}")
     
     if config.dataset == "digit":
         train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
@@ -117,32 +129,30 @@ def main(rank, world_size):
         train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
         val_dataset = GRIDDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
     
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank, shuffle=False)
     
     custom_collate = collate_fn_factory(config.dataset)
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
     
-    # Model uses a hardcoded vocab size. If using raw digits vs phonemes, make sure vocab size accounts for "0"-"9" characters
-    # Usually digit tokens "0", "1"... can just be mapped inside the LipTextVerificationModel's text encoder
     model = LipTextVerificationModel().to(device)
-    model = DDP(model, device_ids=[rank])
+    model = DDP(model, device_ids=[local_rank])
     
     optimizer = Adam(model.parameters(), lr=config.learning_rate)
     
     writer = None
-    if rank == 0:
+    if local_rank == 0:
         os.makedirs(config.output_dir, exist_ok=True)
         writer = SummaryWriter(log_dir=os.path.join(config.output_dir, 'logs'))
         
     for epoch in range(1, config.epochs + 1):
         train_sampler.set_epoch(epoch)
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if rank == 0 else None)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None)
         
         val_loss, val_acc = evaluate_model(model, val_loader, device)
         
-        if rank == 0:
+        if local_rank == 0:
             print(f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
             writer.add_scalar('Loss/val', val_loss, epoch)
             writer.add_scalar('Accuracy/val', val_acc, epoch)
@@ -150,12 +160,23 @@ def main(rank, world_size):
             # Save checkpoint
             torch.save(model.module.state_dict(), os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"))
             
-    cleanup()
+    if "LOCAL_RANK" not in os.environ:
+        cleanup()
 
 if __name__ == "__main__":
-    world_size = torch.cuda.device_count()
-    if world_size > 0:
-        import torch.multiprocessing as mp
-        mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
+    if "LOCAL_RANK" in os.environ:
+        main()
     else:
-        print("No CUDA devices available for DDP.")
+        world_size = torch.cuda.device_count()
+        if world_size > 0:
+            os.environ["MASTER_ADDR"] = "localhost"
+            os.environ["MASTER_PORT"] = "12355"
+            import torch.multiprocessing as mp
+            # If using mp.spawn manually
+            def entry(rank, ws):
+                os.environ["LOCAL_RANK"] = str(rank)
+                os.environ["WORLD_SIZE"] = str(ws)
+                main()
+            mp.spawn(entry, args=(world_size,), nprocs=world_size, join=True)
+        else:
+            print("No CUDA devices available.")

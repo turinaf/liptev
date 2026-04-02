@@ -1,6 +1,6 @@
 import re
 import nltk
-nltk.download('averaged_perceptron_tagger_eng')
+# nltk.download('averaged_perceptron_tagger_eng', quiet=True)
 class PhonemeConverter:
     def __init__(self):
         try:

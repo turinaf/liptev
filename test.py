@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from dataset.grid_loader import GRIDDataset
 from models.verification_model import LipTextVerificationModel
 from evaluation.evaluate import evaluate_model
-from main import collate_fn, Config
+from utils.dataset_utils import collate_fn, Config
 
 def test():
     cfg = Config("config.json")

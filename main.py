@@ -7,6 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torch.optim import Adam
 from dataset.grid_loader import GRIDDataset
+from dataset.digit_loader import DigitDataset
 from utils.phoneme_converter import PhonemeConverter
 from utils.negative_sampler import NegativeSampler
 from models.verification_model import LipTextVerificationModel
@@ -23,7 +24,8 @@ class Config:
                 cfg = json.load(f)
         else:
             cfg = {}
-        self.processed_data_dir = cfg.get("processed_data_dir")
+        self.dataset = cfg.get("dataset")
+        self.processed_data_dir = cfg.get("digit_processed_data_dir") if self.dataset == "digit" else cfg.get("grid_processed_data_dir")
         self.use_audio = cfg.get("use_audio")
         self.batch_size = cfg.get("batch_size")
         self.learning_rate = cfg.get("learning_rate")
@@ -31,200 +33,129 @@ class Config:
         self.max_frames = cfg.get("max_frames")
         self.output_dir = cfg.get("output_dir")
 
-def collate_fn(batch):
-    converter = PhonemeConverter()
-    all_trans = [item['transcript'] for item in batch]
-    sampler = NegativeSampler(all_trans)
-    
-    videos = []
-    phonemes = []
-    labels = []
-    transcripts = []
-    audios = []
-    
-    use_audio = 'audio' in batch[0]
-    
-    for item in batch:
-        vid = item['video']
-        trans = item['transcript']
-        if use_audio: aud = item['audio']
+def collate_fn_factory(dataset_name):
+    def collate_fn(batch):
+        converter = PhonemeConverter()
+        all_trans = [item['transcript'] for item in batch]
+        sampler = NegativeSampler(all_trans)
         
-        # Positive
-        videos.append(vid)
-        p_seq = converter.text_to_phonemes(trans)
-        p_seq = p_seq[:30] + [0] * max(0, 30 - len(p_seq))
-        phonemes.append(torch.tensor(p_seq))
-        labels.append(1.0)
-        transcripts.append(trans)
-        if use_audio: audios.append(aud)
+        videos = []
+        phonemes = []
+        labels = []
+        transcripts = []
+        audios = []
         
-        # Negative
-        neg_trans = sampler.sample(trans)
-        videos.append(vid)
-        n_seq = converter.text_to_phonemes(neg_trans)
-        n_seq = n_seq[:30] + [0] * max(0, 30 - len(n_seq))
-        phonemes.append(torch.tensor(n_seq))
-        labels.append(0.0)
-        transcripts.append(neg_trans)
-        if use_audio: audios.append(aud) 
+        use_audio = 'audio' in batch[0]
         
-    ret = {
-        'video': torch.stack(videos),
-        'phonemes': torch.stack(phonemes),
-        'label': torch.tensor(labels, dtype=torch.float32),
-        'transcripts': transcripts
-    }
-    
-    if use_audio: ret['audio'] = torch.stack(audios)
-    return ret
+        for item in batch:
+            vid = item['video']
+            trans = item['transcript']
+            if use_audio: aud = item['audio']
+            
+            # Positive sample
+            videos.append(vid)
+            if dataset_name == "digit":
+                # Use digits directly as phonemes
+                pos_phonemes = trans.split()
+            else:
+                pos_phonemes = converter.get_phonemes(trans)
+            phonemes.append(pos_phonemes)
+            labels.append(1.0)
+            transcripts.append(trans)
+            if use_audio: audios.append(aud)
+            
+            # Negative sample
+            videos.append(vid)
+            neg_trans = sampler.sample(trans)
+            if dataset_name == "digit":
+                # Use digits directly as phonemes
+                neg_phonemes = neg_trans.split()
+            else:
+                neg_phonemes = converter.get_phonemes(neg_trans)
+            phonemes.append(neg_phonemes)
+            labels.append(0.0)
+            transcripts.append(neg_trans)
+            if use_audio: audios.append(aud)
+            
+        videos = torch.stack(videos)
+        labels = torch.tensor(labels, dtype=torch.float32)
+        if use_audio: 
+            audios = torch.stack(audios)
+            
+        # Note: phonemes is left as a list of lists/strings, model should handle padding/embedding
+        # Model's text encoder needs to correctly map digits if they are passed as words. 
+        batch_dict = {
+            'video': videos,
+            'phonemes': phonemes,
+            'label': labels,
+            'transcript': transcripts
+        }
+        if use_audio:
+            batch_dict['audio'] = audios
+            
+        return batch_dict
+    return collate_fn
 
-def main():
-    # --- DDP Initialization ---
-    is_distributed = "LOCAL_RANK" in os.environ
-    if is_distributed:
-        dist.init_process_group(backend="nccl")
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
-        is_main_process = (local_rank == 0)
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
+
+def main(rank, world_size):
+    setup(rank, world_size)
+    config = Config()
+    
+    device = torch.device(f"cuda:{rank}")
+    
+    if config.dataset == "digit":
+        train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
+        val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
     else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        is_main_process = True
-        local_rank = 0
-
-    cfg = Config("config.json")
-    proj_root = os.path.dirname(__file__)
-    output_dir_abs = os.path.join(proj_root, cfg.output_dir)
+        train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
+        val_dataset = GRIDDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
+    
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    
+    custom_collate = collate_fn_factory(config.dataset)
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate)
+    
+    # Model uses a hardcoded vocab size. If using raw digits vs phonemes, make sure vocab size accounts for "0"-"9" characters
+    # Usually digit tokens "0", "1"... can just be mapped inside the LipTextVerificationModel's text encoder
+    model = LipTextVerificationModel().to(device)
+    model = DDP(model, device_ids=[rank])
+    
+    optimizer = Adam(model.parameters(), lr=config.learning_rate)
     
     writer = None
-    if is_main_process:
-        os.makedirs(output_dir_abs, exist_ok=True)
-        writer = SummaryWriter(log_dir=os.path.join(output_dir_abs, "logs"))
-        print(f"Using device: {device} | Distributed: {is_distributed}")
-    
-    dataset_path = os.path.abspath(os.path.join(proj_root, cfg.processed_data_dir))
-    
-    if not os.path.exists(dataset_path) or len(os.listdir(dataset_path)) == 0:
-        if is_main_process:
-            print(f"Error: Processed dataset directory ({dataset_path}) is missing.")
-        return
+    if rank == 0:
+        os.makedirs(config.output_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir=os.path.join(config.output_dir, 'logs'))
         
-    train_dataset = GRIDDataset(data_dir=dataset_path, split='train', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
-    val_dataset = GRIDDataset(data_dir=dataset_path, split='val', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
-    test_dataset = GRIDDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
-    
-    if is_main_process:
-        print(f"Splits Loaded -> Train: {len(train_dataset)} | Val: {len(val_dataset)}")
-    
-    # --- Distributed Samplers ---
-    train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
-    
-    # Validation/Test do not use DistributedSampler here to keep evaluation full and simple on all GPUs.
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=cfg.batch_size, 
-        shuffle=(train_sampler is None), 
-        sampler=train_sampler, 
-        collate_fn=collate_fn
-    )
-    val_loader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=collate_fn)
-    
-    if is_main_process: print(r"Initializing model...")
-    model = LipTextVerificationModel(vocab_size=75, feature_dim=256).to(device)
-    
-    # --- Wrap Model in DDP ---
-    if is_distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    for epoch in range(1, config.epochs + 1):
+        train_sampler.set_epoch(epoch)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if rank == 0 else None)
         
-    optimizer = Adam(model.parameters(), lr=cfg.learning_rate)
-    best_val_auc = 0.0
-    model_save_path = os.path.join(output_dir_abs, "best_lip_verification_model.pth")
-    
-
-    # --- Checkpoint Resuming logic ---
-    start_epoch = 1
-    checkpoint_pattern = os.path.join(output_dir_abs, "checkpoint_epoch_*.pth")
-    import glob
-    checkpoints = glob.glob(checkpoint_pattern)
-    
-    if checkpoints:
-        # Find latest epoch
-        checkpoints.sort(key=lambda x: int(x.split("_epoch_")[-1].split(".pth")[0]))
-        latest_checkpoint = checkpoints[-1]
+        val_loss, val_acc = evaluate_model(model, val_loader, device)
         
-        if is_main_process:
-            print(f"Loading checkpoint {latest_checkpoint} to resume training...")
+        if rank == 0:
+            print(f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
+            writer.add_scalar('Loss/val', val_loss, epoch)
+            writer.add_scalar('Accuracy/val', val_acc, epoch)
             
-        chk_state = torch.load(latest_checkpoint, map_location=device)
-        
-        # Load weights
-        if is_distributed:
-            model.module.load_state_dict(chk_state['model_state_dict'])
-        else:
-            model.load_state_dict(chk_state['model_state_dict'])
+            # Save checkpoint
+            torch.save(model.module.state_dict(), os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"))
             
-        optimizer.load_state_dict(chk_state['optimizer_state_dict'])
-        start_epoch = chk_state['epoch'] + 1
-        best_val_auc = chk_state.get('best_val_auc', 0.0)
-    
-    if is_main_process: print(r"[--- Starting Training ---]")
-    for epoch in range(start_epoch, cfg.epochs + 1):
-        if is_distributed:
-            # Important: Ensures shuffling depends on epoch
-            train_sampler.set_epoch(epoch)
-            
-        # Only pass writer to rank 0 to avoid multiple tqdm/tensorboard writes
-        loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer=writer if is_main_process else None)
-        
-        if is_main_process:
-            print(f"Epoch {epoch} | Train Loss: {loss:.4f}")
-            print(f"Evaluating Model on Validation Set (Epoch {epoch})...")
-            
-        val_metrics = evaluate_model(model, val_loader, device)
-        
-        if is_main_process:
-            writer.add_scalar('Metrics/val_roc_auc', val_metrics['roc_auc'], epoch)
-            writer.add_scalar('Metrics/val_verify_acc', val_metrics['verification_accuracy'], epoch)
-            
-            if val_metrics['roc_auc'] > best_val_auc:
-                best_val_auc = val_metrics['roc_auc']
-                torch.save(model.module.state_dict() if is_distributed else model.state_dict(), model_save_path)
-                print(f"--> Saved new BEST model with AUC {best_val_auc:.4f} to {model_save_path}")
-            
-            # Save generic checkpoint for resuming
-            checkpoint_path = os.path.join(output_dir_abs, f"checkpoint_epoch_{epoch}.pth")
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.module.state_dict() if is_distributed else model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'best_val_auc': best_val_auc
-            }, checkpoint_path)
-            print(f"--> Saved Checkpoint to {checkpoint_path}")
-
-
-    if is_main_process:
-        print("\n[--- Testing Phase ---]")
-        if os.path.exists(model_save_path):
-            state_dict = torch.load(model_save_path, map_location=device)
-            if is_distributed:
-                model.module.load_state_dict(state_dict)
-            else:
-                model.load_state_dict(state_dict)
-                
-            print("Evaluating Model on Hold-out Test Set...")
-            test_metrics = evaluate_model(model, test_loader, device)
-            
-            writer.add_scalar('Metrics/test_roc_auc', test_metrics['roc_auc'], 1)
-            writer.add_scalar('Metrics/test_verify_acc', test_metrics['verification_accuracy'], 1)
-            print(f"Final Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f}")
-            
-        writer.close()
-        print("Complete!")
-
-    if is_distributed:
-        dist.destroy_process_group()
+    cleanup()
 
 if __name__ == "__main__":
-    main()
-    
+    world_size = torch.cuda.device_count()
+    if world_size > 0:
+        import torch.multiprocessing as mp
+        mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
+    else:
+        print("No CUDA devices available for DDP.")

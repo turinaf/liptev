@@ -42,7 +42,7 @@ def crop_lip_region(rgb_image, detection_result, padding=12, size=(96,96)):
     return lip_crop
 
 
-def extract_lip_frames(video_path, detector):
+def extract_lip_frames(video_path, detector, correct_orientation=False):
     """
     Extracts frames from a video file and crops the lip region dynamically
     using the provided MediaPipe Tasks API detector.
@@ -57,6 +57,11 @@ def extract_lip_frames(video_path, detector):
         if not ret:
             break
             
+        if correct_orientation:
+            # Need to process orientation for smartphones
+            if frame.shape[1] < frame.shape[0]:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+
         # Convert BGR to RGB
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         

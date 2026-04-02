@@ -44,8 +44,15 @@ def prepare_dataset(config_path="config.json"):
     with open(config_path, 'r') as f:
         config = json.load(f)
         
-    raw_dir = config["raw_data_dir"]
-    out_dir = config["processed_data_dir"]
+    dataset = config.get("dataset", "grid")
+    
+    if dataset == "grid":
+        raw_dir = config["grid_raw_data_dir"]
+        out_dir = config["grid_processed_data_dir"]
+    else:
+        raw_dir = config.get("digit_raw_data_dir")
+        out_dir = config.get("digit_processed_data_dir")
+        
     sample_rate = config["audio_sample_rate"]
     mp_model_path = config["mp_model_path"]
     
@@ -64,14 +71,22 @@ def prepare_dataset(config_path="config.json"):
     )
     detector = vision.FaceLandmarker.create_from_options(options)
         
-    print(f"Scanning '{raw_dir}' for GRID speakers...")
+    print(f"Scanning '{raw_dir}' for {dataset.upper()} speakers...")
     
-    speakers = [d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d))]
-    
-    # --- ADD COMLETED SPEAKER FOLDERS HERE ---
-    # e.g., skip_speakers = ["s1", "s2", "s3"]
-    skip_speakers = ["s14_processed", "s9_processed", "s27_processed", "s22_processed", 
-                     "s1_processed", " s29_processed", "s18_processed"] 
+    if dataset == "grid":
+        speakers = [d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d))]
+        skip_speakers = ["s14_processed", "s9_processed", "s27_processed", "s22_processed", 
+                         "s1_processed", " s29_processed", "s18_processed"]
+    else:
+        # digit dataset structure: root_dir (data/digit_raw) -> subset_X -> speaker
+        speakers = []
+        for subset in os.listdir(raw_dir):
+            if subset.startswith("subset") and os.path.isdir(os.path.join(raw_dir, subset)):
+                subset_dir = os.path.join(raw_dir, subset)
+                for spk in os.listdir(subset_dir):
+                    if os.path.isdir(os.path.join(subset_dir, spk)):
+                        speakers.append(os.path.join(subset, spk))
+        skip_speakers = []
     
     for speaker in speakers:
         if speaker in skip_speakers:
@@ -80,30 +95,41 @@ def prepare_dataset(config_path="config.json"):
             
         print(f"Processing speaker: {speaker}")
         speaker_raw_dir = os.path.join(raw_dir, speaker)
-        speaker_out_dir = os.path.join(out_dir, speaker)
-        
-        raw_video_dir = speaker_raw_dir
-        raw_align_dir = os.path.join(speaker_raw_dir, "align")
-        
+        if dataset == "grid":
+            speaker_out_dir = os.path.join(out_dir, speaker)
+            raw_video_dir = speaker_raw_dir
+            raw_align_dir = os.path.join(speaker_raw_dir, "align")
+            videos = glob.glob(os.path.join(raw_video_dir, "*.mpg"))
+            out_align_dir_name = "align"
+            align_ext = ".align"
+        else:
+            # digit dataset
+            speaker_name = os.path.basename(speaker)
+            speaker_out_dir = os.path.join(out_dir, speaker_name)
+            raw_video_dir = os.path.join(speaker_raw_dir, "video")
+            raw_align_dir = os.path.join(speaker_raw_dir, "text")
+            videos = glob.glob(os.path.join(raw_video_dir, "*.mp4")) + glob.glob(os.path.join(raw_video_dir, "*.mov"))
+            out_align_dir_name = "text"
+            align_ext = ".txt"
+            
         out_video_dir = os.path.join(speaker_out_dir, "video")
         out_audio_dir = os.path.join(speaker_out_dir, "audio")
-        out_align_dir = os.path.join(speaker_out_dir, "align")
+        out_align_dir = os.path.join(speaker_out_dir, out_align_dir_name)
         
         os.makedirs(out_video_dir, exist_ok=True)
         os.makedirs(out_audio_dir, exist_ok=True)
         os.makedirs(out_align_dir, exist_ok=True)
         
-        videos = glob.glob(os.path.join(raw_video_dir, "*.mpg"))
         print(f"  Found {len(videos)} videos.")
         
         for vid_path in tqdm(videos, desc=f"Preprocessing {speaker}"):
-            base_name = os.path.basename(vid_path).replace('.mpg', '')
+            base_name = os.path.splitext(os.path.basename(vid_path))[0]
             
             out_vid_path = os.path.join(out_video_dir, f"{base_name}.mp4")
             out_aud_path = os.path.join(out_audio_dir, f"{base_name}.wav")
-            out_aln_path = os.path.join(out_align_dir, f"{base_name}.align")
+            out_aln_path = os.path.join(out_align_dir, f"{base_name}{align_ext}")
             
-            src_aln_path = os.path.join(raw_align_dir, f"{base_name}.align")
+            src_aln_path = os.path.join(raw_align_dir, f"{base_name}{align_ext}")
             
             if not os.path.exists(src_aln_path):
                 continue
@@ -113,13 +139,14 @@ def prepare_dataset(config_path="config.json"):
                 continue
                 
             if not os.path.exists(out_vid_path):
-                cropped_frames = extract_lip_frames(vid_path, detector=detector)
+                correct_orientation = (dataset == "digit")
+                cropped_frames = extract_lip_frames(vid_path, detector=detector, correct_orientation=correct_orientation)
                 if cropped_frames:
                     save_video_from_frames(cropped_frames, out_vid_path, fps=25)
                 else:
                     continue
                 
-            if not os.path.exists(out_aud_path):
+            if not os.path.exists(out_aud_path) and config.get("use_audio", False):
                 extract_audio(vid_path, out_aud_path, sample_rate=sample_rate)
                 
             if not os.path.exists(out_aln_path):

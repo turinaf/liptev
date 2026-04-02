@@ -8,7 +8,7 @@ class LipTextVerificationModel(nn.Module):
     def __init__(self, vocab_size=50, feature_dim=256):
         super(LipTextVerificationModel, self).__init__()
         self.lip_encoder = LipEncoder(feature_dim)
-        self.text_encoder = TextEncoder(vocab_size, feature_dim)
+        self.text_encoder = TextEncoder(vocab_size=vocab_size, feature_dim=feature_dim)
         self.alignment = CrossModalAlignment(feature_dim)
         
         self.classifier = nn.Sequential(
@@ -27,6 +27,7 @@ class LipTextVerificationModel(nn.Module):
         
         lip_pool = lip_feats.mean(dim=1)
         text_pool = text_feats.mean(dim=1)
+        # B x 1 alignment score feature
         align_score = align_out["alignment_score"].unsqueeze(-1)
         
         combined = torch.cat([lip_pool, text_pool, align_score], dim=-1)

@@ -35,14 +35,21 @@ class Config:
 
 def collate_fn_factory(dataset_name):
     # Initialize these ONCE outside the collate_fn to avoid repeated downloads and instantiation
-    converter = PhonemeConverter() if dataset_name != "digit" else None
+    converter = PhonemeConverter()
     
+    # Custom digit vocabulary mapping for direct digit->token indexing
+    # We include '!' as a distinct token representing the alt pronunciation
+    digit_vocab = {str(i): i+1 for i in range(10)} 
+    digit_vocab["!"] = 11
+    digit_vocab["<pad>"] = 0
+    digit_vocab["<unk>"] = 12
+
     def collate_fn(batch):
         all_trans = [item['transcript'] for item in batch]
         sampler = NegativeSampler(all_trans)
         
         videos = []
-        phonemes = []
+        phonemes_indices_list = []
         labels = []
         transcripts = []
         audios = []
@@ -54,41 +61,44 @@ def collate_fn_factory(dataset_name):
             trans = item['transcript']
             if use_audio: aud = item['audio']
             
-            # Positive sample
+            # --- POSITIVE SAMPLE ---
             videos.append(vid)
             if dataset_name == "digit":
-                # Use digits directly as phonemes
-                pos_phonemes = trans.split()
+                # Break "1 2 ! 4" directly into mapped indices
+                pos_indices = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in trans.split()]
             else:
-                pos_phonemes = converter.get_phonemes(trans)
-            phonemes.append(pos_phonemes)
+                _, pos_indices = converter.text_to_phonemes(trans)
+            phonemes_indices_list.append(torch.tensor(pos_indices, dtype=torch.long))
+            
             labels.append(1.0)
             transcripts.append(trans)
             if use_audio: audios.append(aud)
             
-            # Negative sample
+            # --- NEGATIVE SAMPLE ---
             videos.append(vid)
             neg_trans = sampler.sample(trans)
             if dataset_name == "digit":
-                # Use digits directly as phonemes
-                neg_phonemes = neg_trans.split()
+                neg_indices = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in neg_trans.split()]
             else:
-                neg_phonemes = converter.get_phonemes(neg_trans)
-            phonemes.append(neg_phonemes)
+                _, neg_indices = converter.text_to_phonemes(neg_trans)
+            phonemes_indices_list.append(torch.tensor(neg_indices, dtype=torch.long))
+            
             labels.append(0.0)
             transcripts.append(neg_trans)
             if use_audio: audios.append(aud)
             
         videos = torch.stack(videos)
         labels = torch.tensor(labels, dtype=torch.float32)
+        
         if use_audio: 
             audios = torch.stack(audios)
             
-        # Note: phonemes is left as a list of lists/strings, model should handle padding/embedding
-        # Model's text encoder needs to correctly map digits if they are passed as words. 
+        # Pad sequence explicitly to match batch requirements for TextEncoder correctly
+        padded_phonemes = torch.nn.utils.rnn.pad_sequence(phonemes_indices_list, batch_first=True, padding_value=0)
+            
         batch_dict = {
             'video': videos,
-            'phonemes': phonemes,
+            'phonemes': padded_phonemes,
             'label': labels,
             'transcript': transcripts
         }
@@ -136,8 +146,12 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
     
-    model = LipTextVerificationModel().to(device)
-    model = DDP(model, device_ids=[local_rank])
+    if config.dataset == "digit":
+        vocab_size = 13  # 0-9, !, <pad>, <unk>
+    else:
+        vocab_size = 41  # PhonemeConverter.vocab_size (39+pad+unk)
+    model = LipTextVerificationModel(vocab_size=vocab_size).to(device)
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
     optimizer = Adam(model.parameters(), lr=config.learning_rate)
     

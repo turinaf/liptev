@@ -121,7 +121,9 @@ def main():
     if "LOCAL_RANK" in os.environ:
         local_rank = int(os.environ["LOCAL_RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
-        dist.init_process_group("nccl")
+        # Only initialize if NOT ALREADY initialized by torchrun natively
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
         device = torch.device(f"cuda:{local_rank}")
     else:
         # Standalone spawn logic
@@ -190,6 +192,7 @@ if __name__ == "__main__":
             def entry(rank, ws):
                 os.environ["LOCAL_RANK"] = str(rank)
                 os.environ["WORLD_SIZE"] = str(ws)
+                dist.init_process_group("nccl", rank=rank, world_size=ws)
                 main()
             mp.spawn(entry, args=(world_size,), nprocs=world_size, join=True)
         else:

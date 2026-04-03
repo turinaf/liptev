@@ -40,10 +40,13 @@ class GRIDDataset(Dataset):
             
         for vid_path in video_paths:
             base_name = os.path.basename(vid_path).replace('.mp4', '')
-            speaker_dir = os.path.dirname(os.path.dirname(vid_path))
+            original_speaker_dir = os.path.dirname(os.path.dirname(vid_path))
+            speaker_name = os.path.basename(original_speaker_dir)
             
-            align_path = os.path.join(speaker_dir, 'align', f"{base_name}.align")
-            audio_path = os.path.join(speaker_dir, 'audio', f"{base_name}.wav")
+            # Reconstruct paths using the current data_dir
+            vid_path = os.path.join(self.data_dir, speaker_name, 'video', f"{base_name}.mp4")
+            align_path = os.path.join(self.data_dir, speaker_name, 'align', f"{base_name}.align")
+            audio_path = os.path.join(self.data_dir, speaker_name, 'audio', f"{base_name}.wav")
             
             if os.path.exists(align_path):
                 transcript = self._read_align_file(align_path)
@@ -142,11 +145,17 @@ class GRIDDataset(Dataset):
         return ret_dict
 
 if __name__ == "__main__":
-    from torch.utils.data import DataLoader
+    import sys
+    import os
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     
+    from torch.utils.data import DataLoader
+    from utils.dataset_utils import Config
+    config = Config()
     print("Initializing GRIDDataset in 'train' split...")
     # Adjust 'data_dir' to the actual preprocessed dataset path
-    dataset = GRIDDataset(data_dir="./data", split="train", max_frames=75, use_audio=True)
+    print(f"Looking for data in: {config.processed_data_dir}")
+    dataset = GRIDDataset(data_dir=config.processed_data_dir, split="train", max_frames=75, use_audio=True)
     
     print(f"Dataset length: {len(dataset)}")
     

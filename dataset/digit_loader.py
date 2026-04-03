@@ -37,11 +37,14 @@ class DigitDataset(Dataset):
             
         for vid_path in video_paths:
             base_name = os.path.basename(vid_path).replace('.mp4', '')
-            speaker_dir = os.path.dirname(os.path.dirname(vid_path))
+            original_speaker_dir = os.path.dirname(os.path.dirname(vid_path))
+            speaker_name = os.path.basename(original_speaker_dir)
             
             # The digit dataset uses 'text' directory and .txt files
-            align_path = os.path.join(speaker_dir, 'text', f"{base_name}.txt")
-            audio_path = os.path.join(speaker_dir, 'audio', f"{base_name}.wav")
+            # Reconstruct paths using the current data_dir
+            vid_path = os.path.join(self.data_dir, speaker_name, 'video', f"{base_name}.mp4")
+            align_path = os.path.join(self.data_dir, speaker_name, 'text', f"{base_name}.txt")
+            audio_path = os.path.join(self.data_dir, speaker_name, 'audio', f"{base_name}.wav")
             
             if os.path.exists(align_path):
                 transcript = self._read_text_file(align_path)

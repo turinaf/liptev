@@ -4,7 +4,8 @@ from torch.utils.data import DataLoader
 from dataset.grid_loader import GRIDDataset
 from models.verification_model import LipTextVerificationModel
 from evaluation.evaluate import evaluate_model
-from utils.dataset_utils import collate_fn, Config
+from utils.dataset_utils import collate_fn_factory, Config
+from dataset.digit_loader import DigitDataset
 
 def test():
     cfg = Config("config.json")
@@ -21,7 +22,10 @@ def test():
         return
         
     print(f"Loading test dataset from {dataset_path}...")
-    test_dataset = GRIDDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+    if cfg.dataset == "digit":
+        test_dataset = DigitDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+    else:
+        test_dataset = GRIDDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
     
     if len(test_dataset) == 0:
         print("Test dataset is empty. Check your data splits.")
@@ -34,11 +38,16 @@ def test():
         test_dataset, 
         batch_size=cfg.batch_size, 
         shuffle=False, 
-        collate_fn=collate_fn
+        collate_fn=collate_fn_factory(cfg.dataset)
     )
     
     print("Initializing model...")
-    model = LipTextVerificationModel(vocab_size=50, feature_dim=256).to(device)
+    if cfg.dataset == "digit":
+        vocab_size = 13  # 0-9, !, <pad>, <unk>
+    else:
+        from utils.phoneme_converter import PhonemeConverter
+        vocab_size = PhonemeConverter().vocab_size
+    model = LipTextVerificationModel(vocab_size=vocab_size, feature_dim=256).to(device)
     
     model_save_path = os.path.join(output_dir_abs, "best_lip_verification_model.pth")
     if not os.path.exists(model_save_path):

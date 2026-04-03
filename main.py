@@ -8,28 +8,11 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.optim import Adam
 from dataset.grid_loader import GRIDDataset
 from dataset.digit_loader import DigitDataset
-from utils.phoneme_converter import PhonemeConverter
-from utils.negative_sampler import NegativeSampler
 from models.verification_model import LipTextVerificationModel
 from training.train import train_one_epoch
 from evaluation.evaluate import evaluate_model
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-
-            'label': labels,
-            'transcript': transcripts
-        }
-        if use_audio:
-            batch_dict['audio'] = audios
-            
-        return batch_dict
-    return collate_fn
-    # Backwards compatibility: expose a default collate_fn and Config for test scripts
-    try:
-        _cfg_for_test = Config()
-        collate_fn = collate_fn_factory(_cfg_for_test.dataset)
-    except Exception:
-        collate_fn = None
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'

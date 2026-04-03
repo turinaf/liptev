@@ -13,6 +13,9 @@ from training.train import train_one_epoch
 from evaluation.evaluate import evaluate_model
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from utils.dataset_utils import Config, collate_fn_factory
+
+
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'

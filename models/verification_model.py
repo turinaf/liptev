@@ -3,35 +3,74 @@ import torch.nn as nn
 from .lip_encoder import LipEncoder
 from .text_encoder import TextEncoder
 from .cross_modal_alignment import CrossModalAlignment
+from .audio_encoder import AudioEncoder
 
 class LipTextVerificationModel(nn.Module):
     def __init__(self, vocab_size=50, feature_dim=256):
         super(LipTextVerificationModel, self).__init__()
         self.lip_encoder = LipEncoder(feature_dim)
         self.text_encoder = TextEncoder(vocab_size=vocab_size, feature_dim=feature_dim)
-        self.alignment = CrossModalAlignment(feature_dim)
+        self.audio_encoder = AudioEncoder(feature_dim)
+        
+        self.alignment_lip_text = CrossModalAlignment(feature_dim)
+        self.alignment_audio_text = CrossModalAlignment(feature_dim)
+        self.alignment_lip_audio = CrossModalAlignment(feature_dim)
         
         self.classifier = nn.Sequential(
-            nn.Linear(feature_dim * 2 + 1, 128),
+            nn.Linear(feature_dim * 3 + 3, 128),
             nn.ReLU(),
             nn.Linear(128, 1),
             nn.Sigmoid()
         )
 
-    def forward(self, video_frames, phoneme_seqs):
+    def forward(self, video_frames, phoneme_seqs, audio_features=None):
         lip_feats = self.lip_encoder(video_frames)
         text_feats = self.text_encoder(phoneme_seqs)
         
-        # Only does verification/alignment, no reading or visual speech gen.
-        align_out = self.alignment(lip_feats, text_feats)
-        
-        lip_pool = lip_feats.mean(dim=1)
-        text_pool = text_feats.mean(dim=1)
-        # B x 1 alignment score feature
-        align_score = align_out["alignment_score"].unsqueeze(-1)
-        
-        combined = torch.cat([lip_pool, text_pool, align_score], dim=-1)
-        # B x 1 Verification Output 0 - 1
-        consistency_score = self.classifier(combined)
-        
+        if audio_features is not None:
+            audio_feats = self.audio_encoder(audio_features)
+            
+            # Alignments
+            align_lt = self.alignment_lip_text(lip_feats, text_feats)
+            align_at = self.alignment_audio_text(audio_feats, text_feats)
+            align_la = self.alignment_lip_audio(lip_feats, audio_feats)
+            
+            lip_pool = lip_feats.mean(dim=1)
+            text_pool = text_feats.mean(dim=1)
+            audio_pool = audio_feats.mean(dim=1)
+            
+            score_lt = align_lt["alignment_score"].unsqueeze(-1)
+            score_at = align_at["alignment_score"].unsqueeze(-1)
+            score_la = align_la["alignment_score"].unsqueeze(-1)
+            
+            # Combine features
+            combined = torch.cat([lip_pool, text_pool, audio_pool, score_lt, score_at, score_la], dim=-1)
+            
+            consistency_score = self.classifier(combined)
+            
+            # Weighted alignment score
+            final_align_score = 0.4 * align_lt["alignment_score"] + 0.4 * align_at["alignment_score"] + 0.2 * align_la["alignment_score"]
+            align_out = {
+                "alignment_score": final_align_score,
+                "lip_text": align_lt,
+                "audio_text": align_at,
+                "lip_audio": align_la
+            }
+        else:
+            audio_feats = torch.zeros(lip_feats.shape, device=lip_feats.device) # Dummy audio feats
+            align_lt = self.alignment_lip_text(lip_feats, text_feats)
+            
+            lip_pool = lip_feats.mean(dim=1)
+            text_pool = text_feats.mean(dim=1)
+            audio_pool = torch.zeros_like(lip_pool)
+            
+            score_lt = align_lt["alignment_score"].unsqueeze(-1)
+            score_at = torch.zeros_like(score_lt)
+            score_la = torch.zeros_like(score_lt)
+            
+            combined = torch.cat([lip_pool, text_pool, audio_pool, score_lt, score_at, score_la], dim=-1)
+            consistency_score = self.classifier(combined)
+            
+            align_out = align_lt
+
         return consistency_score, align_out

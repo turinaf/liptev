@@ -15,8 +15,13 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None):
         phonemes = batch['phonemes'].to(device)
         labels = batch['label'].to(device) # 1 For match, 0 for negative samples
         
+        if 'audio' in batch:
+            audio = batch['audio'].to(device)
+        else:
+            audio = None
+        
         optimizer.zero_grad()
-        consistency_score, align_out = model(video, phonemes)
+        consistency_score, align_out = model(video, phonemes, audio)
         
         # Binary Cross Entropy (maximize verification score)
         loss_bce = bce_loss_fn(consistency_score.view(-1), labels)

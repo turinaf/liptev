@@ -108,7 +108,7 @@ def prepare_dataset(config_path="config.json"):
             speaker_out_dir = os.path.join(out_dir, speaker)
             raw_video_dir = os.path.join(speaker_raw_dir, "video")
             raw_align_dir = os.path.join(speaker_raw_dir, "text")
-            videos = glob.glob(os.path.join(raw_video_dir, "*.mp4")) + glob.glob(os.path.join(raw_video_dir, "*.mov"))
+            videos = glob.glob(os.path.join(raw_video_dir, "*.mp4"))
             out_align_dir_name = "text"
             align_ext = ".txt"
             

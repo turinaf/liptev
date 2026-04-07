@@ -35,22 +35,42 @@ class DigitDataset(Dataset):
         with open(split_file, "r") as f:
             video_paths = json.load(f)
             
-        for vid_path in video_paths:
-            base_name = os.path.basename(vid_path).replace('.mp4', '')
-            original_speaker_dir = os.path.dirname(os.path.dirname(vid_path))
-            speaker_name = os.path.basename(original_speaker_dir)
+        for vid_path_raw in video_paths:
+            base_name = os.path.basename(vid_path_raw).replace('.mp4', '')
+            # original_speaker_dir = "video"
+            # os.path.dirname(original_speaker_dir) = "1011"
+            speaker_dir_path = os.path.dirname(os.path.dirname(vid_path_raw))
+            speaker_name = os.path.basename(speaker_dir_path)
+            subset_name = os.path.basename(os.path.dirname(speaker_dir_path))
             
             # The digit dataset uses 'text' directory and .txt files
             # Reconstruct paths using the current data_dir
-            vid_path = os.path.join(self.data_dir, speaker_name, 'video', f"{base_name}.mp4")
-            align_path = os.path.join(self.data_dir, speaker_name, 'text', f"{base_name}.txt")
-            audio_path = os.path.join(self.data_dir, speaker_name, 'audio', f"{base_name}.wav")
+            vid_path = os.path.join(self.data_dir, subset_name, speaker_name, 'video', f"{base_name}.mp4")
+            align_path = os.path.join(self.data_dir, subset_name, speaker_name, 'text', f"{base_name}.txt")
+            audio_path = os.path.join(self.data_dir, subset_name, speaker_name, 'audio', f"{base_name}.wav")
             
+            # The paths in the JSON already contain the data_dir prefix! So we don't need to rebuild them if they are absolute/relative from root
+            if "data/digit" in vid_path_raw: # The original passed in vid_path
+                vid_path = vid_path_raw.replace('./', '')
+                align_path = vid_path.replace('/video/', '/text/').replace('.mp4', '.txt')
+                audio_path = vid_path.replace('/video/', '/audio/').replace('.mp4', '.wav')
+                
+            # Allow searching since exlamation points (!) might be escaped/missing and names might vary slightly in the actual filesystem
+            if not os.path.exists(vid_path):
+                 # Try matching without escaping/special characters if exact match fails
+                 potential_matches = glob.glob(os.path.join(self.data_dir, subset_name, speaker_name, 'video', f"*{base_name.split('_')[-2]}*.mp4"))
+                 if potential_matches:
+                     vid_path = potential_matches[0]
+                     base_name = os.path.basename(vid_path).replace('.mp4', '')
+                     align_path = os.path.join(self.data_dir, subset_name, speaker_name, 'text', f"{base_name}.txt")
+                     audio_path = os.path.join(self.data_dir, subset_name, speaker_name, 'audio', f"{base_name}.wav")
+                     
             if os.path.exists(align_path):
                 transcript = self._read_text_file(align_path)
                 
                 # Check for audio if requested
                 if self.use_audio and not os.path.exists(audio_path):
+                    print(f"Missing audio: {audio_path}")
                     continue
                     
                 if transcript:
@@ -63,7 +83,10 @@ class DigitDataset(Dataset):
                         sample_dict["audio"] = audio_path
                         
                     samples.append(sample_dict)
-                    
+            else:
+                print(f"Missing: align={align_path}, audio={audio_path}, video={vid_path}")
+                break
+                
         return samples
 
     def _read_text_file(self, align_path):
@@ -131,3 +154,32 @@ class DigitDataset(Dataset):
             ret_dict["audio"] = audio_tensor
             
         return ret_dict
+
+if __name__ == "__main__":
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from utils.dataset_utils import Config
+    
+    config = Config()
+    test_data_dir = config.processed_data_dir
+    
+    print(f"--- Debugging DigitDataset ---")
+    print(f"Looking for data in: {test_data_dir}")
+    print(f"Using audio: {config.use_audio}")
+    
+    try:
+        dataset = DigitDataset(data_dir=test_data_dir, split='train', max_frames=config.max_frames, use_audio=config.use_audio)
+        print(f"\nSuccessfully loaded train split with {len(dataset)} samples.")
+        
+        if len(dataset) > 0:
+            print("\n--- Inspecting First Sample ---")
+            sample = dataset[0]
+            print(f"Transcript: '{sample['transcript']}'")
+            print(f"Video Tensor Shape: {sample['video'].shape}")
+            print(f"Video Tensor Data Type: {sample['video'].dtype}")
+            print(f"Max Val: {sample['video'].max():.4f}, Min Val: {sample['video'].min():.4f}")
+            if "audio" in sample:
+                print(f"Audio Tensor Shape: {sample['audio'].shape}")
+            
+    except Exception as e:
+        print(f"\nError initializing dataset: {e}")

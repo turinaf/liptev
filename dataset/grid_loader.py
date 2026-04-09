@@ -91,10 +91,13 @@ class GRIDDataset(Dataset):
             frames.append(frame)
         cap.release()
         
+        # Keep true length so downstream modules can build padding masks.
+        true_len = min(len(frames), self.max_frames)
+
         # Temporal padding just in case length doesn't strictly match max_frames
         if len(frames) == 0:
             frames = [torch.zeros((3, 96, 96)) for _ in range(self.max_frames)]
-            return torch.stack(frames)
+            return torch.stack(frames), 0
             
         elif len(frames) > self.max_frames:
             frames = frames[:self.max_frames]
@@ -110,7 +113,7 @@ class GRIDDataset(Dataset):
                 tf = torch.tensor(tf)
             tensor_list.append(tf)
             
-        return torch.stack(tensor_list)
+        return torch.stack(tensor_list), true_len
 
     def _load_audio(self, path):
         # returns simple raw audio form
@@ -131,11 +134,12 @@ class GRIDDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         
-        frames_tensor = self._load_video_frames(sample["video"])
+        frames_tensor, video_len = self._load_video_frames(sample["video"])
         
         ret_dict = {
             "video": frames_tensor,
-            "transcript": sample["transcript"]
+            "transcript": sample["transcript"],
+            "video_len": video_len
         }
         
         if self.use_audio and "audio" in sample:
@@ -151,11 +155,19 @@ if __name__ == "__main__":
     
     from torch.utils.data import DataLoader
     from utils.dataset_utils import Config
+    from utils.phoneme_converter import PhonemeConverter
+    from utils.negative_sampler import NegativeSampler
+
     config = Config()
     print("Initializing GRIDDataset in 'train' split...")
     # Adjust 'data_dir' to the actual preprocessed dataset path
     print(f"Looking for data in: {config.processed_data_dir}")
-    dataset = GRIDDataset(data_dir=config.processed_data_dir, split="train", max_frames=75, use_audio=True)
+    dataset = GRIDDataset(
+        data_dir=config.processed_data_dir,
+        split="train",
+        max_frames=config.max_frames,
+        use_audio=config.use_audio
+    )
     
     print(f"Dataset length: {len(dataset)}")
     
@@ -168,5 +180,33 @@ if __name__ == "__main__":
         print(f"Transcripts: {batch['transcript']}")
         if "audio" in batch:
             print(f"Audio batch shape (B, channels, samples): {batch['audio'].shape}")
+
+        print("\n--- Positive/Negative Debug Samples ---")
+        converter = PhonemeConverter()
+        transcript_pool = [item["transcript"] for item in dataset.samples]
+        sampler = NegativeSampler(transcript_pool)
+
+        sample_count = min(3, len(dataset))
+        for idx in range(sample_count):
+            sample = dataset[idx]
+            pos_transcript = sample["transcript"]
+            pos_phonemes, pos_indices = converter.text_to_phonemes(pos_transcript)
+
+            neg_transcript = sampler.sample(pos_transcript)
+            neg_phonemes, neg_indices = converter.text_to_phonemes(neg_transcript)
+
+            print(f"\nSample {idx + 1} Positive:")
+            print(f"Transcript: '{pos_transcript}'")
+            print(f"Phonemes: {pos_phonemes}")
+            print(f"Phoneme indices: {pos_indices}")
+            print(f"Video Tensor Shape: {sample['video'].shape}")
+            print(f"Video Length (unpadded): {sample['video_len']}")
+            if "audio" in sample:
+                print(f"Audio Tensor Shape: {sample['audio'].shape}")
+
+            print(f"Sample {idx + 1} Negative:")
+            print(f"Transcript: '{neg_transcript}'")
+            print(f"Phonemes: {neg_phonemes}")
+            print(f"Phoneme indices: {neg_indices}")
     else:
         print("Dataset is empty. Ensure data is correctly preprocessed and paths are valid.")

@@ -13,6 +13,14 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None):
     for batch_idx, batch in pbar:
         video = batch['video'].to(device)
         phonemes = batch['phonemes'].to(device)
+        phoneme_padding_mask = batch.get('phoneme_padding_mask')
+        if phoneme_padding_mask is not None:
+            phoneme_padding_mask = phoneme_padding_mask.to(device)
+
+        video_padding_mask = batch.get('video_padding_mask')
+        if video_padding_mask is not None:
+            video_padding_mask = video_padding_mask.to(device)
+
         labels = batch['label'].to(device) # 1 For match, 0 for negative samples
         
         if 'audio' in batch:
@@ -21,7 +29,13 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None):
             audio = None
         
         optimizer.zero_grad()
-        consistency_score, align_out = model(video, phonemes, audio)
+        consistency_score, align_out = model(
+            video,
+            phonemes,
+            audio,
+            video_padding_mask=video_padding_mask,
+            phoneme_padding_mask=phoneme_padding_mask
+        )
         
         # Binary Cross Entropy (maximize verification score)
         loss_bce = bce_loss_fn(consistency_score.view(-1), labels)

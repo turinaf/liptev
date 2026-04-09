@@ -1,5 +1,7 @@
 import torch
 import os
+import glob
+import re
 from torch.utils.data import DataLoader
 from dataset.grid_loader import GRIDDataset
 from models.verification_model import LipTextVerificationModel
@@ -7,10 +9,43 @@ from evaluation.evaluate import evaluate_model
 from utils.dataset_utils import collate_fn_factory, Config
 from dataset.digit_loader import DigitDataset
 
+
+def _resolve_latest_checkpoint(output_dir_abs):
+    # Priority order: explicit best checkpoint, then latest epoch checkpoint.
+    preferred = [
+        os.path.join(output_dir_abs, "best_lip_verification_model.pth"),
+        os.path.join(output_dir_abs, "best_lip_verification_model.pt"),
+    ]
+    for path in preferred:
+        if os.path.exists(path):
+            return path
+
+    patterns = [
+        "checkpoint_ep*.pt",       # current training format
+        "checkpoint_ep*.pth",
+        "checkpoint_epoch_*.pth",  # legacy format
+        "checkpoint_epoch_*.pt",
+    ]
+
+    candidates = []
+    for pattern in patterns:
+        candidates.extend(glob.glob(os.path.join(output_dir_abs, pattern)))
+
+    if not candidates:
+        return None
+
+    def extract_epoch(path):
+        name = os.path.basename(path)
+        match = re.search(r"(?:checkpoint_ep|checkpoint_epoch_)(\d+)", name)
+        return int(match.group(1)) if match else -1
+
+    candidates.sort(key=extract_epoch)
+    return candidates[-1]
+
 def test():
     cfg = Config("config.json")
     proj_root = os.path.dirname(os.path.abspath(__file__))
-    output_dir_abs = os.path.join(proj_root, cfg.output_dir)
+    output_dir_abs = cfg.output_dir if os.path.isabs(cfg.output_dir) else os.path.abspath(os.path.join(proj_root, cfg.output_dir))
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -45,27 +80,23 @@ def test():
     if cfg.dataset == "digit":
         vocab_size = 13  # 0-9, !, <pad>, <unk>
     else:
-        from utils.phoneme_converter import PhonemeConverter
-        vocab_size = PhonemeConverter().vocab_size
-    model = LipTextVerificationModel(vocab_size=vocab_size, feature_dim=256).to(device)
+        vocab_size = 41  # PhonemeConverter vocab used in training
+    model = LipTextVerificationModel(
+        vocab_size=vocab_size,
+        feature_dim=256,
+        lip_backbone_pretrained=cfg.lip_backbone_pretrained
+    ).to(device)
     
-    model_save_path = os.path.join(output_dir_abs, "best_lip_verification_model.pth")
-    if not os.path.exists(model_save_path):
-        # Fallback to check for standard checkpoints
-        print(f"Could not find {model_save_path}, looking for other checkpoints...")
-        import glob
-        checkpoints = glob.glob(os.path.join(output_dir_abs, "checkpoint_epoch_*.pth"))
-        if not checkpoints:
-            print("No checkpoints found. Please train the model first.")
-            return
-        checkpoints.sort(key=lambda x: int(x.split("_epoch_")[-1].split(".pth")[0]))
-        model_save_path = checkpoints[-1]
+    model_save_path = _resolve_latest_checkpoint(output_dir_abs)
+    if model_save_path is None:
+        print(f"No checkpoints found under {output_dir_abs}. Please train the model first.")
+        return
     
     print(f"Loading weights from {model_save_path}...")
     checkpoint = torch.load(model_save_path, map_location=device)
     
     # Handle both standalone weights and wrapped checkpoint dictionaries
-    state_dict = checkpoint.get('model_state_dict', checkpoint)
+    state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
     
     # Handle DDP weights (stripping the 'module.' prefix if the model was trained with Multi-GPU)
     clean_state_dict = {}

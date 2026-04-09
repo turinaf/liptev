@@ -20,9 +20,11 @@ class Config:
         self.epochs = cfg.get("epochs", 100)
         self.max_frames = cfg.get("max_frames", 75)
         self.output_dir = cfg.get("output_dir", "./exp/no_audio")
+        self.lip_backbone_pretrained = cfg.get("lip_backbone_pretrained", True)
 
-def collate_fn_factory(dataset_name):
+def collate_fn_factory(dataset_name, transcript_pool=None):
     converter = PhonemeConverter() if dataset_name != "digit" else None
+    global_sampler = NegativeSampler(transcript_pool or [])
     
     digit_vocab = {str(i): i+1 for i in range(10)} 
     digit_vocab["!"] = 11
@@ -31,9 +33,9 @@ def collate_fn_factory(dataset_name):
 
     def collate_fn(batch):
         all_trans = [item['transcript'] for item in batch]
-        sampler = NegativeSampler(all_trans)
+        sampler = global_sampler if len(global_sampler.all_transcripts) > 0 else NegativeSampler(all_trans)
         
-        videos, phonemes_indices_list, labels, transcripts, audios = [], [], [], [], []
+        videos, phonemes_indices_list, labels, transcripts, audios, video_lens = [], [], [], [], [], []
         use_audio = 'audio' in batch[0]
         
         for item in batch:
@@ -50,6 +52,7 @@ def collate_fn_factory(dataset_name):
             
             labels.append(1.0)
             transcripts.append(trans)
+            video_lens.append(int(item.get('video_len', vid.shape[0])))
             if use_audio: audios.append(aud)
             
             # --- NEGATIVE SAMPLE ---
@@ -63,6 +66,7 @@ def collate_fn_factory(dataset_name):
             
             labels.append(0.0)
             transcripts.append(neg_trans)
+            video_lens.append(int(item.get('video_len', vid.shape[0])))
             if use_audio: audios.append(aud)
             
         videos = torch.stack(videos)
@@ -70,10 +74,17 @@ def collate_fn_factory(dataset_name):
         if use_audio: audios = torch.stack(audios)
             
         padded_phonemes = torch.nn.utils.rnn.pad_sequence(phonemes_indices_list, batch_first=True, padding_value=0)
+        phoneme_padding_mask = padded_phonemes.eq(0)
+
+        max_t = videos.shape[1]
+        video_lens_t = torch.tensor(video_lens, dtype=torch.long)
+        video_padding_mask = torch.arange(max_t).unsqueeze(0) >= video_lens_t.unsqueeze(1)
             
         batch_dict = {
             'video': videos,
             'phonemes': padded_phonemes,
+            'phoneme_padding_mask': phoneme_padding_mask,
+            'video_padding_mask': video_padding_mask,
             'label': labels,
             'transcript': transcripts
         }

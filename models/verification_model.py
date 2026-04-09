@@ -6,9 +6,9 @@ from .cross_modal_alignment import CrossModalAlignment
 from .audio_encoder import AudioEncoder
 
 class LipTextVerificationModel(nn.Module):
-    def __init__(self, vocab_size=50, feature_dim=256):
+    def __init__(self, vocab_size=50, feature_dim=256, lip_backbone_pretrained=True):
         super(LipTextVerificationModel, self).__init__()
-        self.lip_encoder = LipEncoder(feature_dim)
+        self.lip_encoder = LipEncoder(feature_dim, backbone_pretrained=lip_backbone_pretrained)
         self.text_encoder = TextEncoder(vocab_size=vocab_size, feature_dim=feature_dim)
         self.audio_encoder = AudioEncoder(feature_dim)
         
@@ -23,17 +23,22 @@ class LipTextVerificationModel(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, video_frames, phoneme_seqs, audio_features=None):
-        lip_feats = self.lip_encoder(video_frames)
-        text_feats = self.text_encoder(phoneme_seqs)
+    def forward(self, video_frames, phoneme_seqs, audio_features=None, video_padding_mask=None, phoneme_padding_mask=None):
+        lip_feats = self.lip_encoder(video_frames, padding_mask=video_padding_mask)
+        text_feats = self.text_encoder(phoneme_seqs, padding_mask=phoneme_padding_mask)
         
         if audio_features is not None:
             audio_feats = self.audio_encoder(audio_features)
             
             # Alignments
-            align_lt = self.alignment_lip_text(lip_feats, text_feats)
+            align_lt = self.alignment_lip_text(
+                lip_feats,
+                text_feats,
+                lip_padding_mask=video_padding_mask,
+                text_padding_mask=phoneme_padding_mask
+            )
             align_at = self.alignment_audio_text(audio_feats, text_feats)
-            align_la = self.alignment_lip_audio(lip_feats, audio_feats)
+            align_la = self.alignment_lip_audio(lip_feats, audio_feats, lip_padding_mask=video_padding_mask)
             
             lip_pool = lip_feats.mean(dim=1)
             text_pool = text_feats.mean(dim=1)
@@ -58,7 +63,12 @@ class LipTextVerificationModel(nn.Module):
             }
         else:
             audio_feats = torch.zeros(lip_feats.shape, device=lip_feats.device) # Dummy audio feats
-            align_lt = self.alignment_lip_text(lip_feats, text_feats)
+            align_lt = self.alignment_lip_text(
+                lip_feats,
+                text_feats,
+                lip_padding_mask=video_padding_mask,
+                text_padding_mask=phoneme_padding_mask
+            )
             
             lip_pool = lip_feats.mean(dim=1)
             text_pool = text_feats.mean(dim=1)

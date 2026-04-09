@@ -26,67 +26,78 @@ def cleanup():
     dist.destroy_process_group()
 
 def main():
-    # Detect if spawned via torchrun
-    if "LOCAL_RANK" in os.environ:
-        local_rank = int(os.environ["LOCAL_RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        # Only initialize if NOT ALREADY initialized by torchrun natively
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
-        device = torch.device(f"cuda:{local_rank}")
-    else:
-        # Standalone spawn logic
-        setup(0, 1)
-        local_rank = 0
-        world_size = 1
-        device = torch.device("cuda:0")
-
-    config = Config()
-    
-    if config.dataset == "digit":
-        train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
-        val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
-    else:
-        train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
-        val_dataset = GRIDDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
-    
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank, shuffle=False)
-    
-    custom_collate = collate_fn_factory(config.dataset)
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
-    
-    if config.dataset == "digit":
-        vocab_size = 13  # 0-9, !, <pad>, <unk>
-    else:
-        vocab_size = 41  # PhonemeConverter.vocab_size (39+pad+unk)
-    model = LipTextVerificationModel(vocab_size=vocab_size).to(device)
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
-    
-    optimizer = Adam(model.parameters(), lr=config.learning_rate)
-    
     writer = None
-    if local_rank == 0:
-        os.makedirs(config.output_dir, exist_ok=True)
-        writer = SummaryWriter(log_dir=os.path.join(config.output_dir, 'logs'))
+    try:
+        # Detect if spawned via torchrun
+        if "LOCAL_RANK" in os.environ:
+            local_rank = int(os.environ["LOCAL_RANK"])
+            world_size = int(os.environ["WORLD_SIZE"])
+            # Only initialize if NOT ALREADY initialized by torchrun natively
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl")
+            device = torch.device(f"cuda:{local_rank}")
+        else:
+            # Standalone spawn logic
+            setup(0, 1)
+            local_rank = 0
+            world_size = 1
+            device = torch.device("cuda:0")
+
+        config = Config()
         
-    for epoch in range(1, config.epochs + 1):
-        train_sampler.set_epoch(epoch)
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None)
+        if config.dataset == "digit":
+            train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
+            val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
+        else:
+            train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
+            val_dataset = GRIDDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
         
-        metrics = evaluate_model(model, val_loader, device)
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
+        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank, shuffle=False)
+        
+        transcript_pool = [s.get("transcript", "") for s in getattr(train_dataset, "samples", [])]
+        custom_collate = collate_fn_factory(config.dataset, transcript_pool=transcript_pool)
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
+        
+        if config.dataset == "digit":
+            vocab_size = 13  # 0-9, !, <pad>, <unk>
+        else:
+            vocab_size = 41  # PhonemeConverter.vocab_size (39+pad+unk)
+        model = LipTextVerificationModel(
+            vocab_size=vocab_size,
+            lip_backbone_pretrained=config.lip_backbone_pretrained
+        ).to(device)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        
+        optimizer = Adam(model.parameters(), lr=config.learning_rate)
         
         if local_rank == 0:
-            print(f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | Val ROC AUC: {metrics["roc_auc"]:.4f} | Val Ver Acc: {metrics["verification_accuracy"]:.4f}")
-            writer.add_scalar('Logic/roc_auc', metrics["roc_auc"], epoch)
-            writer.add_scalar('Accuracy/verify', metrics["verification_accuracy"], epoch)
+            os.makedirs(config.output_dir, exist_ok=True)
+            writer = SummaryWriter(log_dir=os.path.join(config.output_dir, 'logs'))
             
-            # Save checkpoint
-            torch.save(model.module.state_dict(), os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"))
+        for epoch in range(1, config.epochs + 1):
+            train_sampler.set_epoch(epoch)
+            train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None)
             
-    if "LOCAL_RANK" not in os.environ:
-        cleanup()
+            metrics = evaluate_model(model, val_loader, device)
+            
+            if local_rank == 0:
+                print(
+                    f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | "
+                    f"Val ROC AUC: {metrics['roc_auc']:.4f} | "
+                    f"Val Ver Acc: {metrics['verification_accuracy']:.4f}"
+                )
+                writer.add_scalar('Logic/roc_auc', metrics["roc_auc"], epoch)
+                writer.add_scalar('Accuracy/verify', metrics["verification_accuracy"], epoch)
+                
+                # Save checkpoint
+                torch.save(model.module.state_dict(), os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"))
+    finally:
+        if writer is not None:
+            writer.close()
+        if dist.is_initialized():
+            cleanup()
 
 if __name__ == "__main__":
     if "LOCAL_RANK" in os.environ:
@@ -101,7 +112,6 @@ if __name__ == "__main__":
             def entry(rank, ws):
                 os.environ["LOCAL_RANK"] = str(rank)
                 os.environ["WORLD_SIZE"] = str(ws)
-                dist.init_process_group("nccl", rank=rank, world_size=ws)
                 main()
             mp.spawn(entry, args=(world_size,), nprocs=world_size, join=True)
         else:

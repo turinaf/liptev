@@ -106,9 +106,11 @@ class DigitDataset(Dataset):
             frames.append(frame)
         cap.release()
         
+        true_len = min(len(frames), self.max_frames)
+
         if len(frames) == 0:
             frames = [torch.zeros((3, 96, 96)) for _ in range(self.max_frames)]
-            return torch.stack(frames)
+            return torch.stack(frames), 0
             
         elif len(frames) > self.max_frames:
             frames = frames[:self.max_frames]
@@ -124,7 +126,7 @@ class DigitDataset(Dataset):
                 tf = torch.tensor(tf)
             tensor_list.append(tf)
             
-        return torch.stack(tensor_list)
+        return torch.stack(tensor_list), true_len
 
     def _load_audio(self, path):
         waveform, sr = torchaudio.load(path, backend="ffmpeg")
@@ -142,11 +144,12 @@ class DigitDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         
-        frames_tensor = self._load_video_frames(sample["video"])
+        frames_tensor, video_len = self._load_video_frames(sample["video"])
         
         ret_dict = {
             "video": frames_tensor,
-            "transcript": sample["transcript"]
+            "transcript": sample["transcript"],
+            "video_len": video_len
         }
         
         if self.use_audio and "audio" in sample:
@@ -159,6 +162,7 @@ if __name__ == "__main__":
     import sys
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from utils.dataset_utils import Config
+    from utils.negative_sampler import NegativeSampler
     
     config = Config()
     test_data_dir = config.processed_data_dir
@@ -170,16 +174,39 @@ if __name__ == "__main__":
     try:
         dataset = DigitDataset(data_dir=test_data_dir, split='train', max_frames=config.max_frames, use_audio=config.use_audio)
         print(f"\nSuccessfully loaded train split with {len(dataset)} samples.")
+
+        digit_vocab = {str(i): i + 1 for i in range(10)}
+        digit_vocab["!"] = 11
+        digit_vocab["<pad>"] = 0
+        digit_vocab["<unk>"] = 12
+
+        def transcript_to_sequence(transcript):
+            return [digit_vocab.get(token, digit_vocab["<unk>"]) for token in transcript.split()]
         
         if len(dataset) > 0:
-            print("\n--- Inspecting First Sample ---")
-            sample = dataset[0]
-            print(f"Transcript: '{sample['transcript']}'")
-            print(f"Video Tensor Shape: {sample['video'].shape}")
-            print(f"Video Tensor Data Type: {sample['video'].dtype}")
-            print(f"Max Val: {sample['video'].max():.4f}, Min Val: {sample['video'].min():.4f}")
-            if "audio" in sample:
-                print(f"Audio Tensor Shape: {sample['audio'].shape}")
+            print("\n--- Inspecting Samples ---")
+            transcript_pool = [sample_item["transcript"] for sample_item in dataset.samples]
+            sampler = NegativeSampler(transcript_pool)
+
+            sample_count = min(3, len(dataset))
+            for idx in range(sample_count):
+                sample = dataset[idx]
+                positive_seq = transcript_to_sequence(sample["transcript"])
+                negative_transcript = sampler.sample(sample["transcript"])
+                negative_seq = transcript_to_sequence(negative_transcript)
+
+                print(f"\nSample {idx + 1} Positive:")
+                print(f"Transcript: '{sample['transcript']}'")
+                print(f"Sequence: {positive_seq}")
+                print(f"Video Tensor Shape: {sample['video'].shape}")
+                print(f"Video Tensor Data Type: {sample['video'].dtype}")
+                print(f"Max Val: {sample['video'].max():.4f}, Min Val: {sample['video'].min():.4f}")
+                if "audio" in sample:
+                    print(f"Audio Tensor Shape: {sample['audio'].shape}")
+
+                print(f"Sample {idx + 1} Negative:")
+                print(f"Transcript: '{negative_transcript}'")
+                print(f"Sequence: {negative_seq}")
             
     except Exception as e:
         print(f"\nError initializing dataset: {e}")

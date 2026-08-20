@@ -104,40 +104,78 @@ def prepare_dataset(config_path="config.json"):
             align_ext = ".align"
         else:
             # digit dataset
-            
+
             speaker_out_dir = os.path.join(out_dir, speaker)
             raw_video_dir = os.path.join(speaker_raw_dir, "video")
             raw_align_dir = os.path.join(speaker_raw_dir, "text")
+            raw_lab_dir = os.path.join(speaker_raw_dir, "lab")
             videos = glob.glob(os.path.join(raw_video_dir, "*.mp4"))
             out_align_dir_name = "text"
             align_ext = ".txt"
-            
+
         out_video_dir = os.path.join(speaker_out_dir, "video")
         out_audio_dir = os.path.join(speaker_out_dir, "audio")
         out_align_dir = os.path.join(speaker_out_dir, out_align_dir_name)
-        
+        # Per-video source metadata (fps) for datasets whose raw timeline
+        # differs from the 25 fps re-encode; also receives copied .lab files.
+        out_lab_dir = os.path.join(speaker_out_dir, "lab") if dataset == "digit" else None
+        meta_path = os.path.join(speaker_out_dir, "meta.json") if dataset == "digit" else None
+
         os.makedirs(out_video_dir, exist_ok=True)
         os.makedirs(out_audio_dir, exist_ok=True)
         os.makedirs(out_align_dir, exist_ok=True)
+        if out_lab_dir is not None:
+            os.makedirs(out_lab_dir, exist_ok=True)
+
+        # {base_name: {"source_fps": float}} — consumed by DigitDataset to
+        # convert .lab seconds to frame indices.
+        video_meta = {}
+        if meta_path is not None and os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r") as f:
+                    video_meta = json.load(f)
+            except (OSError, ValueError):
+                video_meta = {}
         
         print(f"  Found {len(videos)} videos.")
         
         for vid_path in tqdm(videos, desc=f"Preprocessing {speaker}"):
             base_name = os.path.splitext(os.path.basename(vid_path))[0]
-            
+
             out_vid_path = os.path.join(out_video_dir, f"{base_name}.mp4")
             out_aud_path = os.path.join(out_audio_dir, f"{base_name}.wav")
             out_aln_path = os.path.join(out_align_dir, f"{base_name}{align_ext}")
-            
+
             src_aln_path = os.path.join(raw_align_dir, f"{base_name}{align_ext}")
-            
+            src_lab_path = os.path.join(raw_lab_dir, f"{base_name}.lab") if dataset == "digit" else None
+
             if not os.path.exists(src_aln_path):
                 continue
-                
+
+            # Record the raw video's fps before any processing (also on the
+            # already-processed skip path, so existing data gets backfilled):
+            # the 25 fps re-encode preserves frame indices but relabels the
+            # timebase, so .lab seconds must be converted at the source rate.
+            # Measured rates vary per recording device (~29.9 fps VFR, 25 fps).
+            if meta_path is not None and base_name not in video_meta:
+                probe = cv2.VideoCapture(vid_path)
+                fps = probe.get(cv2.CAP_PROP_FPS)
+                probe.release()
+                video_meta[base_name] = {"source_fps": fps if fps and fps > 0 else 25.0}
+                with open(meta_path, "w") as f:
+                    json.dump(video_meta, f)
+
+            # Boundary-supervision files for the digit dataset (kept on the
+            # skip path as well — see above).
+            if src_lab_path is not None and os.path.exists(src_lab_path):
+                out_lab_path = os.path.join(out_lab_dir, f"{base_name}.lab")
+                if not os.path.exists(out_lab_path):
+                    shutil.copy2(src_lab_path, out_lab_path)
+
             # Skip video explicitly if it's already completely extracted
             if os.path.exists(out_vid_path) and os.path.exists(out_aln_path):
                 continue
-                
+
             if not os.path.exists(out_vid_path):
                 correct_orientation = (dataset == "digit")
                 cropped_frames = extract_lip_frames(vid_path, detector=detector, correct_orientation=correct_orientation)
@@ -145,10 +183,10 @@ def prepare_dataset(config_path="config.json"):
                     save_video_from_frames(cropped_frames, out_vid_path, fps=25)
                 else:
                     continue
-                
+
             if not os.path.exists(out_aud_path) and config.get("use_audio", False):
                 extract_audio(vid_path, out_aud_path, sample_rate=sample_rate)
-                
+
             if not os.path.exists(out_aln_path):
                 shutil.copy2(src_aln_path, out_aln_path)
 

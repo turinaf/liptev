@@ -7,10 +7,15 @@
     "use_audio": false,
     "audio_sample_rate": 16000,
     "max_frames": 75,
+    "digit_max_frames": 125,
+    "digit_source_fps": 29.87,
     "mp_model_path": "face_landmarker.task",
     "batch_size": 24,
     "learning_rate": 0.0001,
     "lip_backbone_pretrained": true,
     "epochs": 100,
+    "lambda_ctc": 1.0,
+    "lambda_align": 1.0,
+    "alignment_temperature": 1.0,
     "output_dir": "./exp/grid/no_audio"
 }

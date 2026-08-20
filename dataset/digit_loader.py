@@ -8,7 +8,8 @@ from torch.utils.data import Dataset
 import torchvision.transforms as T
 
 class DigitDataset(Dataset):
-    def __init__(self, data_dir, split='train', max_frames=75, transform=None, use_audio=False):
+    def __init__(self, data_dir, split='train', max_frames=125, transform=None, use_audio=False,
+                 source_fps=29.87):
         """
         Loads the preprocessed Digit dataset using pre-computed split files.
         """
@@ -16,25 +17,73 @@ class DigitDataset(Dataset):
         self.split = split
         self.max_frames = max_frames
         self.use_audio = use_audio
+        # Fallback fps for converting .lab seconds to frames when the
+        # pipeline's per-video meta.json is unavailable (measured source
+        # rates vary per device: ~29.9 fps VFR and 25 fps both occur).
+        self.source_fps = source_fps
         self.transform = transform or T.Compose([
             T.ToTensor(),
             T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
-        
+        self._fps_meta_cache = {}
+
         self.samples = self._load_dataset_paths()
+
+    def _speaker_fps(self, subset_name, speaker_name, base_name):
+        """Per-video source fps from the speaker's meta.json (written by the
+        pipeline), falling back to the configured default."""
+        key = (subset_name, speaker_name)
+        if key not in self._fps_meta_cache:
+            meta_path = os.path.join(self.data_dir, subset_name, speaker_name, "meta.json")
+            try:
+                with open(meta_path, "r") as f:
+                    self._fps_meta_cache[key] = json.load(f)
+            except (OSError, ValueError):
+                self._fps_meta_cache[key] = {}
+        entry = self._fps_meta_cache[key].get(base_name)
+        if entry and entry.get("source_fps", 0) > 0:
+            return entry["source_fps"]
+        return self.source_fps
+
+    def _find_lab_file(self, subset_name, speaker_name, base_name):
+        """Processed .lab location: text/ (alongside .txt) or lab/ (copied
+        from the raw tree by the pipeline)."""
+        for dirname in ("text", "lab"):
+            path = os.path.join(self.data_dir, subset_name, speaker_name, dirname, f"{base_name}.lab")
+            if os.path.exists(path):
+                return path
+        return None
+
+    def _parse_lab_file(self, lab_path):
+        """Parse .lab: line 1 = digit sequence, line 2 = per-digit
+        'start-end' seconds in the raw video's timeline."""
+        with open(lab_path, "r") as f:
+            lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+        if len(lines) < 2:
+            return None, None
+        digits = lines[0].split()
+        try:
+            times = [tuple(float(x) for x in rng.split("-")) for rng in lines[1].split()]
+        except ValueError:
+            return None, None
+        if len(digits) != len(times):
+            return None, None
+        return digits, times
 
     def _load_dataset_paths(self):
         samples = []
-        
+        skipped_lab_out_of_window = 0
+        skipped_lab_mismatch = 0
+
         split_file = os.path.join(self.data_dir, f"{self.split}_split.json")
-        
+
         if not os.path.exists(split_file):
             print(f"Warning: Split file {split_file} not found. Please run pipeline/data_preparation.py first.")
             return []
-            
+
         with open(split_file, "r") as f:
             video_paths = json.load(f)
-            
+
         for vid_path_raw in video_paths:
             base_name = os.path.basename(vid_path_raw).replace('.mp4', '')
             # original_speaker_dir = "video"
@@ -79,14 +128,36 @@ class DigitDataset(Dataset):
                         "transcript": transcript,
                         "align_path": align_path
                     }
+
+                    # Optional .lab boundary supervision. Frames beyond the
+                    # max_frames window can't be supervised (and the visible
+                    # content would contradict the transcript), so those
+                    # samples are skipped rather than truncated.
+                    lab_path = self._find_lab_file(subset_name, speaker_name, base_name)
+                    if lab_path is not None:
+                        lab_digits, lab_times = self._parse_lab_file(lab_path)
+                        if lab_digits is None or lab_digits != transcript.split():
+                            skipped_lab_mismatch += 1
+                        elif any(int(round(e * self._speaker_fps(subset_name, speaker_name, base_name))) > self.max_frames
+                                 for _, e in lab_times):
+                            skipped_lab_out_of_window += 1
+                            continue
+                        else:
+                            sample_dict["lab_times"] = lab_times
+                            sample_dict["source_fps"] = self._speaker_fps(subset_name, speaker_name, base_name)
+
                     if self.use_audio:
                         sample_dict["audio"] = audio_path
-                        
+
                     samples.append(sample_dict)
             else:
                 print(f"Missing: align={align_path}, audio={audio_path}, video={vid_path}")
-                break
-                
+                continue
+
+        if skipped_lab_out_of_window or skipped_lab_mismatch:
+            print(f"Digit[{self.split}]: skipped {skipped_lab_out_of_window} samples whose .lab "
+                  f"extends beyond {self.max_frames} frames, {skipped_lab_mismatch} with invalid/mismatched .lab")
+
         return samples
 
     def _read_text_file(self, align_path):
@@ -143,19 +214,31 @@ class DigitDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        
+
         frames_tensor, video_len = self._load_video_frames(sample["video"])
-        
+
         ret_dict = {
             "video": frames_tensor,
             "transcript": sample["transcript"],
             "video_len": video_len
         }
-        
+
+        # .lab seconds -> frames at the raw video's fps (frame indices are
+        # preserved by the 25 fps re-encode).
+        if "lab_times" in sample:
+            fps = sample["source_fps"]
+            digits = sample["transcript"].split()
+            ret_dict["digit_times"] = [
+                (d,
+                 max(0, min(int(round(s * fps)), video_len)),
+                 max(0, min(int(round(e * fps)), video_len)))
+                for d, (s, e) in zip(digits, sample["lab_times"])
+            ]
+
         if self.use_audio and "audio" in sample:
             audio_tensor = self._load_audio(sample["audio"])
             ret_dict["audio"] = audio_tensor
-            
+
         return ret_dict
 
 if __name__ == "__main__":

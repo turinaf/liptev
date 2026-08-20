@@ -46,8 +46,8 @@ def main():
         config = Config()
         
         if config.dataset == "digit":
-            train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
-            val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
+            train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps)
+            val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps)
         else:
             train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
             val_dataset = GRIDDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
@@ -78,7 +78,9 @@ def main():
             
         for epoch in range(1, config.epochs + 1):
             train_sampler.set_epoch(epoch)
-            train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None)
+            train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None,
+                                         lambda_ctc=config.lambda_ctc, lambda_align=config.lambda_align,
+                                         alignment_temperature=config.alignment_temperature)
             
             metrics = evaluate_model(model, val_loader, device)
             

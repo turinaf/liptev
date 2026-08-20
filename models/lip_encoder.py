@@ -3,6 +3,19 @@ import torch.nn as nn
 import torchvision.models as models
 
 
+def masked_mean(x, padding_mask):
+    """Mean over non-padded sequence positions.
+
+    x: B x T x D; padding_mask: B x T bool where True marks padding.
+    Without this, padded (repeated last-frame) positions leak into pooled
+    features and the classifier.
+    """
+    if padding_mask is None:
+        return x.mean(dim=1)
+    valid = (~padding_mask).unsqueeze(-1).to(x.dtype)
+    return (x * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
+
+
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=1000):
         super().__init__()

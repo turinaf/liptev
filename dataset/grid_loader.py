@@ -49,35 +49,53 @@ class GRIDDataset(Dataset):
             audio_path = os.path.join(self.data_dir, speaker_name, 'audio', f"{base_name}.wav")
             
             if os.path.exists(align_path):
-                transcript = self._read_align_file(align_path)
-                
+                transcript, align_words, align_max_end = self._read_align_file(align_path)
+
                 # Check for audio if requested
                 if self.use_audio and not os.path.exists(audio_path):
                     continue
-                    
+
                 if transcript:
                     sample_dict = {
                         "video": vid_path,
                         "transcript": transcript,
-                        "align_path": align_path
+                        "align_path": align_path,
+                        "align_words": align_words,
+                        "align_max_end": align_max_end
                     }
                     if self.use_audio:
                         sample_dict["audio"] = audio_path
-                        
+
                     samples.append(sample_dict)
-                    
+
         return samples
 
     def _read_align_file(self, align_path):
-        words = []
+        """Parse a GRID .align file.
+
+        Boundary values stay in the file's raw timebase (measured ~25 kHz
+        audio samples; NOT seconds) — they are calibrated per sample against
+        the video's true frame count in __getitem__ (utils.alignment.
+        calibrate_value_to_frame). sil/sp entries are excluded from word
+        times but counted toward the calibration span, since the file
+        covers the whole clip.
+        """
+        words, raw_words = [], []
+        max_end = 0.0
         with open(align_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) == 3:
                     start, end, word = parts
+                    try:
+                        start_v, end_v = float(start), float(end)
+                    except ValueError:
+                        continue
+                    max_end = max(max_end, end_v)
+                    raw_words.append((word, start_v, end_v))
                     if word not in ['sil', 'sp']:
                         words.append(word)
-        return " ".join(words)
+        return " ".join(words), [(w, s, e) for w, s, e in raw_words if w not in ['sil', 'sp']], max_end
 
     def _load_video_frames(self, path):
         """ Loads already pre-cropped and pre-sized video """
@@ -133,19 +151,30 @@ class GRIDDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        
+
         frames_tensor, video_len = self._load_video_frames(sample["video"])
-        
+
         ret_dict = {
             "video": frames_tensor,
             "transcript": sample["transcript"],
             "video_len": video_len
         }
-        
+
+        # Calibrate raw align values to this clip's frame grid.
+        if video_len > 0 and sample.get("align_max_end", 0) > 0:
+            scale = video_len / sample["align_max_end"]
+            word_times = [
+                (w,
+                 max(0, min(int(round(s * scale)), video_len)),
+                 max(0, min(int(round(e * scale)), video_len)))
+                for w, s, e in sample["align_words"]
+            ]
+            ret_dict["word_times"] = word_times
+
         if self.use_audio and "audio" in sample:
             audio_tensor = self._load_audio(sample["audio"])
             ret_dict["audio"] = audio_tensor
-            
+
         return ret_dict
 
 if __name__ == "__main__":

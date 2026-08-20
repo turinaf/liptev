@@ -110,7 +110,9 @@ def run_inference(video_path, transcript, model_path=None, dataset=None):
         phones = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in transcript.split()]
     else:
         converter = PhonemeConverter()
-        _, phones = converter.text_to_phonemes(transcript)
+        # Per-word phonemization — the same source the model is trained on
+        # (the legacy whole-sentence path emitted <unk> for every space).
+        phones = converter.flatten_per_word(converter.text_to_phoneme_indices_per_word(transcript))
         
     if len(phones) == 0:
         phones = [0]

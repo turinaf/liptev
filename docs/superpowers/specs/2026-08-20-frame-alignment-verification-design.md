@@ -1,7 +1,28 @@
 # Design: Frame-Level Alignment for Lip-to-Text Verification
 
-Date: 2026-08-20
+Date: 2026-08-20 (rev. 2, same day — blocker fixes from review)
 Branch: `feature/frame-alignment-verification`
+
+> **Rev. 2 changelog** (issues found reviewing rev. 1 against the actual data):
+> 1. GRID `.align` times are **not seconds** — rev. 1's example format was
+>   wrong. Real files use integer values (audio samples at ~25 kHz for a 3 s
+>   clip). Conversion is now auto-calibrated per sample (§2.1).
+> 2. `.lab` files exist only in the raw tree; the pipeline never copied them,
+>   so the loader could never find them. `pipeline/data_preparation.py` is now
+>   in scope (§2.2, §9).
+> 3. CTC and alignment losses are now restricted to **positive pairs only** —
+>   rev. 1 would have trained the model to align mismatched text (§4).
+> 4. Per-word phonemization is now the single source for both the encoder
+>   input and the alignment targets; the whole-sentence `g2p` path also had a
+>   latent bug (spaces mapped to `<unk>`) (§5.3).
+> 5. Digit source fps is **per-video** (measured 25 fps and ~29.9 fps VFR in
+>   different subsets), so the pipeline records it per video in `meta.json`;
+>   `digit_max_frames` raised to 125 with an explicit skip policy for samples
+>   whose `.lab` extends beyond the window (38% of videos exceed the old
+>   75-frame cap; max is 337) (§2.2).
+> 6. The CTC log-likelihood fed to the classifier is per-token normalized (§3.3).
+> 7. Per-sample `has_align_target` mask so batches with missing `.lab` targets
+>   don't bias the alignment loss (§4).
 
 ## 1. Problem
 
@@ -20,43 +41,71 @@ the digit dataset (digits).
 
 ### 2.1 GRID (word-level alignments)
 
-`*.align` files contain one word per line:
+`*.align` files contain one token per line with integer boundary values, e.g.
+(from `ts-lip2text/data/bbaf2n.align`, a 3 s / 75-frame clip):
 
 ```
-0.060 0.280 bin
+0 23750 sil
+23750 29500 bin
+29500 34000 blue
 ...
+53000 74500 sil
 ```
 
-`start` and `end` are in seconds. Processed videos are written at 25fps
-(`pipeline/data_preparation.py`), so:
+The unit is **audio samples (~25 kHz)**, not seconds: word durations at
+/25000 are plausible ("bin" 0.23 s, "at" 0.06 s) and the final value (74500)
+matches the 3 s clip. Hardcoding any single unit is fragile, so the
+frame conversion is auto-calibrated per sample: the align file spans the whole
+clip (starts at 0, ends at the video end), therefore
 
 ```
-start_frame = int(start_seconds * 25)
-end_frame   = int(end_seconds * 25)
+frame = round(value * video_len / max_end_value)
 ```
 
-Each word maps to a frame range. Within a word, frames are distributed
-uniformly across that word's phonemes (CMU-dict per-word phoneme mapping via
-`PhonemeConverter`). This yields a soft target matrix `B x T x L`.
+where `video_len` is the clip's true (unpadded) frame count. This is correct
+for any timebase and needs no unit constant. Frames are clamped to
+`[0, video_len)`; a warning is logged if >10% of a sample's word frames land
+out of range (indicates a corrupt/unusual align file).
+
+Each word's frame range is split uniformly (contiguously) across that word's
+phonemes — each speech frame is assigned to exactly one phoneme (one-hot row,
+not soft). `sil`/`sp` entries are excluded from targets but included in the
+calibration span.
 
 ### 2.2 Digits (digit-level alignments, `.lab` files)
 
-User-provided `.lab` files contain two lines:
+Raw `.lab` files (raw tree: `subset_X/speaker/lab/<base>.lab`) contain:
 
 ```
-7 0 6 7 9 3 2 5
-0.3-0.57 0.6-0.72 0.75-0.93 0.96-1.17 1.2-1.38 1.41-1.65 1.68-1.74 1.77-2.01
+7 3 0 8 4 6 5
+0.3-0.51 0.54-0.93 0.99-1.26 1.32-1.59 1.62-1.92 2.19-2.37 2.4-2.64
 ```
 
-- Line 1: digit sequence (same tokens as the `.txt` transcript)
-- Line 2: per-token `start-end` ranges in seconds
+- Line 1: digit sequence (must match the `.txt` transcript; on mismatch the
+  boundary data is dropped and the sample trains CTC-only, counted + logged).
+- Line 2: per-token `start-end` ranges **in seconds, in the raw video's
+  timeline**.
 
-Each digit maps to a frame range -> one-hot target matrix `B x T x L`.
+Three data facts drive the design:
 
-The `DigitDataset` loader searches for `<base>.lab` next to `<base>.txt` (same
-`text/` directory, and also probes a sibling `lab/` directory). If no `.lab`
-file exists for a sample, the sample still trains via CTC with no alignment
-supervision loss.
+1. **Pipeline copies `lab/` → processed `lab/`** (rev. 1 omitted this; the
+   loader only sees the processed tree, so without this step no `.lab` is ever
+   found).
+2. **Source fps is per-video.** Measured: some subsets are ~29.9 fps VFR
+   (e.g. 19500/653), others exactly 25 fps. The processed re-encode keeps all
+   frames but labels them 25 fps, so `frame = round(seconds * source_fps)`
+   requires the *source* fps. The pipeline records it per video in
+   `subset_X/speaker/meta.json` (`{"<base>": {"source_fps": 29.87, ...}}`)
+   while reading the raw video anyway. Loader resolution order:
+   `meta.json` → config `digit_source_fps` (default 29.87) → warn.
+3. **Frame budget.** 38% of raw videos exceed the old 75-frame cap (p50=70,
+   p95=112, max=337). `digit_max_frames: 125` (covers p95). Samples whose
+   `.lab` spoken range extends beyond frame 125 are **skipped at scan time**
+   (counted + logged) rather than trained on truncated positives — the
+   transcript would claim digits the network never sees.
+
+If no `.lab` exists for a sample, the sample still trains via CTC with no
+boundary supervision (`has_align_target = 0`).
 
 ## 3. Model Architecture Changes
 
@@ -65,23 +114,29 @@ supervision loss.
 Add to `LipTextVerificationModel`:
 
 ```python
-self.ctc_head = nn.Linear(feature_dim, vocab_size + 1)  # blank token appended
+self.ctc_head = nn.Linear(feature_dim, vocab_size + 1)  # blank appended
 ```
 
-`blank = vocab_size` (41 for GRID, 13 for digits). Per-frame logits over the
-lip encoder output (`B x T x V+1`). CTC loss enforces monotonic frame->token
-alignment implicitly and is the primary alignment mechanism for both datasets.
+`blank = vocab_size` (41 for GRID, 13 for digits); head output `B x T x (V+1)`
+over the lip encoder per-frame features (the lip encoder preserves T, so CTC
+`input_lengths = video_lens`). CTC is the primary alignment mechanism for both
+datasets.
 
 ### 3.2 Masked pooling
 
 Replace un-masked `mean(dim=1)` pooling with mask-aware pooling for lip, text,
-and audio features. Padded frames are currently averaged in, leaking repeated
-last-frame padding into the pooled representation and into the classifier.
+and audio features (audio only when lengths are available; currently dormant
+while `use_audio=false`). Padded frames are currently averaged in, leaking
+repeated last-frame padding into the pooled representation.
 
 ### 3.3 CTC log-likelihood feature
 
-Feed `log P(T|V)` (negative of CTC loss per sample) into the classifier input
-vector so the verification score is alignment-aware.
+`log P(T|V)` is unbounded and length-dependent, so the classifier receives the
+**per-token normalized** value `log P(T|V) / target_len` (typ. in [-10, 0]).
+It is computed inside `forward` for every pair (for negatives it is naturally
+low — that is the point), returned as `ctc_logp_per_token`, and reused by the
+training loop as the CTC loss term (no double computation). Gradients flow
+both through the loss and the classifier feature.
 
 ## 4. Losses
 
@@ -89,78 +144,98 @@ vector so the verification score is alignment-aware.
 loss = BCE + contrastive + lambda_ctc * CTC + lambda_align * AlignmentKL
 ```
 
-- **CTC**: `torch.nn.CTCLoss` between per-frame lip logits and the token
-  sequence (blank = vocab_size). Uses `video_lens` as `input_lengths` and true
-  token length as `target_lengths`.
-- **AlignmentKL**: frame->token softmax over the cross-modal `sim_matrix`
-  (`B x T x L`, temperature-scaled), cross-entropy against the target matrix,
-  masked to speech frames (frames belonging to some token) and non-padded
-  frames.
-- CTC already enforces monotonic alignment; no separate monotonicity regularizer
-  is added.
+- **CTC and AlignmentKL are computed on positive pairs only.** The collate
+  duplicates each video with a mismatched negative transcript; supervising
+  those pairs would train the model to align text that contradicts the lips.
+  (The CTC *feature* still feeds the classifier for negative pairs.)
+- **CTC**: `F.ctc_loss` with `reduction='none'` on log-softmaxed per-frame
+  logits; mean over positive samples. `input_lengths` from the video padding
+  mask, `target_lengths` from the phoneme padding mask.
+- **AlignmentKL**: temperature-scaled frame→token softmax over the
+  cross-modal `sim_matrix` (`B x T x L`), cross-entropy against the one-hot
+  target rows, averaged over frames valid for that sample (speech ∧
+  non-padded ∧ `has_align_target`) — per-sample frame means are then averaged
+  over samples that have targets, so batches with partial `.lab` coverage
+  aren't biased.
+- CTC already enforces monotonic alignment; no separate monotonicity
+  regularizer.
 - BCE + contrastive verification terms are unchanged.
 
 New config keys (with defaults): `lambda_ctc: 1.0`, `lambda_align: 1.0`,
-`alignment_temperature: 1.0`.
+`alignment_temperature: 1.0`, `digit_source_fps: 29.87`,
+`digit_max_frames: 125`.
 
 ## 5. Data Loading
 
 ### 5.1 `dataset/grid_loader.py`
 
-- Parse `.align` into `word_times`: list of `(word, start_frame, end_frame)`.
-- Expose in `__getitem__` as `word_times`.
-- Keep existing transcript behavior.
+- Parse `.align` into `word_times`: list of `(word, start_value, end_value)`
+  plus the file's `max_end`; convert to frames in `__getitem__` using the
+  §2.1 calibration (video_len is known there).
+- Expose `word_times` (frame indices) in `__getitem__`.
 
 ### 5.2 `dataset/digit_loader.py`
 
-- Fix the `break` bug (missing align file aborts the entire loop) -> `continue`.
-- Read `.lab` files into `digit_times`: list of `(digit, start_frame, end_frame)`.
-  Probe `<base>.lab` in `text/` and `lab/`; if absent, `digit_times = None`.
-- Expose in `__getitem__` as `digit_times`.
+- Fix the `break` bug (missing align file aborts the entire loop) → `continue`.
+- Read `.lab` (probe processed `text/<base>.lab`, then `lab/<base>.lab`);
+  convert seconds → frames via §2.2 fps resolution; apply the §2.2 skip
+  policy. Expose `digit_times`.
 
-### 5.3 `utils/alignment.py` (new)
+### 5.3 `utils/alignment.py` (new) + `utils/phoneme_converter.py`
 
-- `build_word_to_phoneme_indices(converter, transcript)` -> list of
-  `(word, [phoneme_ids])` using per-word CMU-dict mapping (deterministic).
-- `build_alignment_targets(seq_len, times, token_id_fn, max_frames)` -> target
-  matrix `T x L` (soft for phonemes, one-hot for digits) plus a speech-frame
-  mask, given frame-index ranges per token.
+- `PhonemeConverter.word_to_phoneme_indices(word)` and
+  `text_to_phoneme_indices_per_word(text)`: per-word `g2p`, filtering
+  non-ARPABET tokens. **Single source of truth**: the concatenated per-word
+  indices are used both as the text-encoder input and as the target token
+  axis. This also fixes the latent whole-sentence path where every inter-word
+  space became `<unk>` (`vocab.get(' ')`).
+- `build_alignment_targets(token_frame_ranges, video_len, target_len)` →
+  `(targets T x L one-hot rows, speech_mask T)`.
+- `calibrate_frames(values, max_end, video_len)` for §2.1.
 
 ### 5.4 `utils/dataset_utils.py` (collate)
 
-- Build per-sample alignment targets from `word_times` / `digit_times`.
-- Return `alignment_targets` (`B x T x L`) and `speech_mask` (`B x T`) in the
-  batch dict.
+- GRID phoneme sequences come from per-word phonemization (both pairs).
+- Build alignment targets for **positive** samples only (negatives keep
+  zeros). Batch gains `alignment_targets` (`B x T x L`), `speech_mask`
+  (`B x T`), `has_align_target` (`B`, float).
 
 ## 6. Negative Sampling (`utils/negative_sampler.py`)
 
 - Make the sampler dataset-aware (`dataset_name` arg).
 - `phoneme_similar`:
-  - GRID: replace a randomly chosen word position with a phonetically
-    confusable GRID word (color->color, letter->letter, digit-word->digit-word,
-    other GRID vocab words).
-  - Digits: replace one digit with a random different digit (retry on identity).
-- Global guard: if the generated negative equals the positive transcript, fall
-  back to `_random_other`.
+  - GRID: replace a randomly chosen word with a phonetically confusable GRID
+    word from the same grammatical class (color→color, letter→letter,
+    digit-word→digit-word, command/prep/adverb classes), fallback to random
+    GRID vocab word.
+  - Digits: replace one digit with a random different digit (retry on
+    identity).
+- Global guard: if the generated negative equals the positive transcript
+  (e.g. shuffled "7 7 7 7"), fall back to `_random_other`.
 
 ## 7. Training Loop (`training/train.py`)
 
-- Extract per-frame lip logits for CTC.
-- Compute CTC loss and alignment KL loss alongside BCE/contrastive.
-- Weighted sum per config.
-- Keep the existing tensorboard logging; add CTC and alignment loss scalars.
+- Read `ctc_logp_per_token` from the model output; CTC loss = mean over
+  positive samples.
+- AlignmentKL from `sim_matrix` per §4; skipped (0) when no sample in the
+  batch has targets.
+- Weighted sum per config; new tensorboard scalars for CTC and alignment.
 
 ## 8. Docs & Naming
 
-- Rename "IPA" references to "ARPABET" in `LIP-TO-TEXT.MD` and comments
-  (the vocab is ARPABET from `g2p_en`).
+- Renamed "IPA" references to "ARPABET" — on inspection none exist in
+  `LIP-TO-TEXT.MD` or the code, so no changes were needed. The vocab is
+  ARPABET from `g2p_en` throughout.
+- `inference.py` switched from the legacy whole-sentence phonemization to
+  the per-word path so inference sequences match training sequences exactly.
 
 ## 9. Files Touched
 
 - `models/verification_model.py`
-- `models/lip_encoder.py` (masked pooling helper)
+- `models/lip_encoder.py` (shared masked-pooling helper)
 - `dataset/grid_loader.py`
 - `dataset/digit_loader.py`
+- `pipeline/data_preparation.py` (copy `lab/`, write `meta.json` with source fps)
 - `utils/alignment.py` (new)
 - `utils/dataset_utils.py`
 - `utils/negative_sampler.py`
@@ -168,13 +243,24 @@ New config keys (with defaults): `lambda_ctc: 1.0`, `lambda_align: 1.0`,
 - `training/train.py`
 - `config.json`
 - `LIP-TO-TEXT.MD`
+- `tests/test_alignment.py` (new)
+- `inference.py` (per-word phonemization for train/inference consistency)
+
+Out of scope (follow-ups): digit split protocol (random split ignores the
+`_train_`/`_verify_` filename tags and leaks speakers across splits).
 
 ## 10. Verification Plan
 
-1. Sanity test: per-word phoneme mapping (`build_word_to_phoneme_indices`).
-2. Sanity test: alignment-target builder on synthetic frame ranges.
-3. Sanity test: digit negative sampler never returns `positive` and never
-   produces `"4 red 6"`-style cross-vocab garbage.
-4. Unit smoke test: model forward with CTC head + masked pooling on a small
-   batch for both GRID and digit vocab sizes.
-5. End-to-end: `torchrun --nproc_per_node=2 main.py` on the existing data.
+1. Unit: per-word phonemization — no `<unk>` for spaces, concatenation equals
+   per-word results.
+2. Unit: target builder on synthetic frame ranges — one-hot rows, speech mask,
+   out-of-range clamping.
+3. Unit: digit negative sampler never returns the positive; GRID class-aware
+   swaps stay in-class.
+4. Unit: calibration maps a real-format GRID align (0–74500 → 0–75) correctly.
+5. Smoke: model forward with CTC head + masked pooling on a small random
+   batch for both vocab sizes (CPU).
+6. Data sanity (against raw data in `../ts-lip2text`): parsed `.align` frame
+   ranges ⊆ [0, 75]; `.lab` discovery + fps resolution produce in-range frames.
+7. End-to-end: `torchrun main.py` on a CUDA box on existing data (out of scope
+   for this machine; CPU smoke covers the code paths).

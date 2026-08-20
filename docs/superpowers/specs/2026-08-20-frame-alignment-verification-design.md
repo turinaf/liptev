@@ -1,7 +1,32 @@
 # Design: Frame-Level Alignment for Lip-to-Text Verification
 
-Date: 2026-08-20 (rev. 2, same day — blocker fixes from review)
+Date: 2026-08-20 (rev. 3 — audio-path fixes from sample-data review)
 Branch: `feature/frame-alignment-verification`
+
+> **Rev. 3 changelog** (issues found testing audio against the sample data
+> in `./data`):
+> 1. **Audio was hard-truncated to 3 s** while video kept up to 125 frames —
+>   37% of digit samples had later digits with lip movement but silence.
+>   Audio length now follows the kept frames per sample
+>   (`samples = sr × video_len / fps`); GRID is native 75 frames/3 s
+>   (verified: 984/1000 sample videos are exactly 75 frames), digit budget
+>   stays 125 (measured p95) — no independent seconds cap anywhere.
+> 2. **`.txt` transcripts contain `!` tokens that `.lab` omits** — strict
+>   equality dropped 40% of boundary supervision (220/371 → 336/366 after
+>   the fix). Matching now compares digit tokens only; `!` keeps its
+>   sequence slot (CTC/embedding) with zero supervised frames.
+> 3. **No audio padding mask existed** — zero-padded silence (log-mel
+>   −13.8) leaked into both audio alignments and mean pooling. The collate
+>   now builds `audio_padding_mask` (samples), the model converts it to the
+>   mel-frame domain, and it masks the audio transformer, both cross-modal
+>   alignments, and audio pooling.
+> 4. **AudioEncoder had no positional encoding** — a permutation-invariant
+>   transformer over time. Sinusoidal PE added (shared with the lip
+>   encoder).
+> 5. **fps fallback fixed at 29.87 for everyone** — sample data includes
+>   ~25/26 fps speakers (misplacing frames ~20%). When `meta.json` is
+>   absent the loader now infers per-video fps exactly from processed frame
+>   count ÷ raw audio duration (wav header, stdlib).
 
 > **Rev. 2 changelog** (issues found reviewing rev. 1 against the actual data):
 > 1. GRID `.align` times are **not seconds** — rev. 1's example format was
@@ -233,6 +258,7 @@ New config keys (with defaults): `lambda_ctc: 1.0`, `lambda_align: 1.0`,
 
 - `models/verification_model.py`
 - `models/lip_encoder.py` (shared masked-pooling helper)
+- `models/audio_encoder.py` (positional encoding, padding mask)
 - `dataset/grid_loader.py`
 - `dataset/digit_loader.py`
 - `pipeline/data_preparation.py` (copy `lab/`, write `meta.json` with source fps)
@@ -241,6 +267,7 @@ New config keys (with defaults): `lambda_ctc: 1.0`, `lambda_align: 1.0`,
 - `utils/negative_sampler.py`
 - `utils/phoneme_converter.py`
 - `training/train.py`
+- `evaluation/evaluate.py` (audio mask pass-through)
 - `config.json`
 - `LIP-TO-TEXT.MD`
 - `tests/test_alignment.py` (new)

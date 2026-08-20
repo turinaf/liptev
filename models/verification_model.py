@@ -65,7 +65,17 @@ class LipTextVerificationModel(nn.Module):
             )
         return nll / target_lengths.clamp(min=1), valid
 
-    def forward(self, video_frames, phoneme_seqs, audio_features=None, video_padding_mask=None, phoneme_padding_mask=None):
+    @staticmethod
+    def _mel_domain_mask(audio_padding_mask, T_mel, hop_length):
+        """Convert a sample-domain audio padding mask (True = padded) to the
+        mel-frame domain: mel frame t is valid iff its window starts inside
+        the real audio (t * hop < audio_len)."""
+        audio_lens = (~audio_padding_mask).sum(dim=1).clamp(min=1)
+        positions = torch.arange(T_mel, device=audio_padding_mask.device)
+        return positions.unsqueeze(0) * hop_length >= audio_lens.unsqueeze(1)
+
+    def forward(self, video_frames, phoneme_seqs, audio_features=None, video_padding_mask=None,
+                phoneme_padding_mask=None, audio_padding_mask=None):
         lip_feats = self.lip_encoder(video_frames, padding_mask=video_padding_mask)
         text_feats = self.text_encoder(phoneme_seqs, padding_mask=phoneme_padding_mask)
 
@@ -76,7 +86,15 @@ class LipTextVerificationModel(nn.Module):
         ctc_logp_per_token = -ctc_nll_per_token.unsqueeze(-1)
 
         if audio_features is not None:
-            audio_feats = self.audio_encoder(audio_features)
+            if audio_padding_mask is not None:
+                # Mel length is deterministic (torchaudio MelSpectrogram uses
+                # center=True): T_mel = samples // hop + 1.
+                hop = self.audio_encoder.hop_length()
+                T_mel = audio_features.shape[-1] // hop + 1
+                audio_mel_mask = self._mel_domain_mask(audio_padding_mask, T_mel, hop)
+            else:
+                audio_mel_mask = None
+            audio_feats = self.audio_encoder(audio_features, padding_mask=audio_mel_mask)
 
             # Alignments
             align_lt = self.alignment_lip_text(
@@ -85,12 +103,22 @@ class LipTextVerificationModel(nn.Module):
                 lip_padding_mask=video_padding_mask,
                 text_padding_mask=phoneme_padding_mask
             )
-            align_at = self.alignment_audio_text(audio_feats, text_feats)
-            align_la = self.alignment_lip_audio(lip_feats, audio_feats, lip_padding_mask=video_padding_mask)
+            align_at = self.alignment_audio_text(
+                audio_feats,
+                text_feats,
+                lip_padding_mask=audio_mel_mask,
+                text_padding_mask=phoneme_padding_mask
+            )
+            align_la = self.alignment_lip_audio(
+                lip_feats,
+                audio_feats,
+                lip_padding_mask=video_padding_mask,
+                text_padding_mask=audio_mel_mask
+            )
 
             lip_pool = masked_mean(lip_feats, video_padding_mask)
             text_pool = masked_mean(text_feats, phoneme_padding_mask)
-            audio_pool = audio_feats.mean(dim=1)  # no audio lengths in batch yet
+            audio_pool = masked_mean(audio_feats, audio_mel_mask)
 
             score_lt = align_lt["alignment_score"].unsqueeze(-1)
             score_at = align_at["alignment_score"].unsqueeze(-1)

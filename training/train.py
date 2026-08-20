@@ -57,8 +57,12 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
 
         if 'audio' in batch:
             audio = batch['audio'].to(device)
+            audio_padding_mask = batch.get('audio_padding_mask')
+            if audio_padding_mask is not None:
+                audio_padding_mask = audio_padding_mask.to(device)
         else:
             audio = None
+            audio_padding_mask = None
 
         optimizer.zero_grad()
         consistency_score, align_out = model(
@@ -66,7 +70,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
             phonemes,
             audio,
             video_padding_mask=video_padding_mask,
-            phoneme_padding_mask=phoneme_padding_mask
+            phoneme_padding_mask=phoneme_padding_mask,
+            audio_padding_mask=audio_padding_mask
         )
 
         # Binary Cross Entropy (maximize verification score)

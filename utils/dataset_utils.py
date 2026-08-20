@@ -47,7 +47,7 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
         all_trans = [item['transcript'] for item in batch]
         sampler = global_sampler if len(global_sampler.all_transcripts) > 0 else NegativeSampler(all_trans, dataset_name=dataset_name)
 
-        videos, phonemes_indices_list, labels, transcripts, audios, video_lens = [], [], [], [], [], []
+        videos, phonemes_indices_list, labels, transcripts, audios, audio_lens, video_lens = [], [], [], [], [], [], []
         # Per-sample boundary times for the POSITIVE pair only (a negative
         # transcript contradicts the video, so it has no valid alignment).
         token_times_list, use_audio = [], 'audio' in batch[0]
@@ -60,7 +60,8 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             videos.append(vid)
             if dataset_name == "digit":
                 pos_indices = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in trans.split()]
-                # digit_times: [(digit, start_frame, end_frame)] — one token each
+                # digit_times: [(token, start_frame, end_frame)] over the full
+                # token sequence — "!" slots carry (0, 0) ranges (zero frames)
                 token_times = [
                     ([digit_vocab.get(d, digit_vocab["<unk>"])], fs, fe)
                     for d, fs, fe in item.get('digit_times') or []
@@ -79,7 +80,9 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             labels.append(1.0)
             transcripts.append(trans)
             video_lens.append(int(item.get('video_len', vid.shape[0])))
-            if use_audio: audios.append(aud)
+            if use_audio:
+                audios.append(aud)
+                audio_lens.append(int(item.get('audio_len', aud.shape[1])))
 
             # --- NEGATIVE SAMPLE ---
             videos.append(vid)
@@ -94,11 +97,21 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             labels.append(0.0)
             transcripts.append(neg_trans)
             video_lens.append(int(item.get('video_len', vid.shape[0])))
-            if use_audio: audios.append(aud)
+            if use_audio:
+                audios.append(aud)
+                audio_lens.append(int(item.get('audio_len', aud.shape[1])))
 
         videos = torch.stack(videos)
         labels = torch.tensor(labels, dtype=torch.float32)
-        if use_audio: audios = torch.stack(audios)
+        if use_audio:
+            max_audio = max(a.shape[1] for a in audios)
+            audios = torch.stack([
+                torch.nn.functional.pad(a, (0, max_audio - a.shape[1])) for a in audios
+            ])
+            audio_lens_t = torch.tensor(audio_lens, dtype=torch.long)
+            audio_padding_mask = torch.arange(max_audio).unsqueeze(0) >= audio_lens_t.unsqueeze(1)
+        else:
+            audio_padding_mask = None
 
         padded_phonemes = torch.nn.utils.rnn.pad_sequence(phonemes_indices_list, batch_first=True, padding_value=0)
         phoneme_padding_mask = padded_phonemes.eq(0)
@@ -134,7 +147,9 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             'speech_mask': speech_mask,
             'has_align_target': has_align_target
         }
-        if use_audio: batch_dict['audio'] = audios
+        if use_audio:
+            batch_dict['audio'] = audios
+            batch_dict['audio_padding_mask'] = audio_padding_mask
 
         return batch_dict
     return collate_fn

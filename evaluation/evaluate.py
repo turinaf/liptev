@@ -14,6 +14,10 @@ def evaluate_model(model, dataloader, device):
             if audio is not None:
                 audio = audio.to(device)
 
+            audio_padding_mask = batch.get('audio_padding_mask')
+            if audio_padding_mask is not None:
+                audio_padding_mask = audio_padding_mask.to(device)
+
             phoneme_padding_mask = batch.get('phoneme_padding_mask')
             if phoneme_padding_mask is not None:
                 phoneme_padding_mask = phoneme_padding_mask.to(device)
@@ -27,7 +31,8 @@ def evaluate_model(model, dataloader, device):
                 phonemes,
                 audio,
                 video_padding_mask=video_padding_mask,
-                phoneme_padding_mask=phoneme_padding_mask
+                phoneme_padding_mask=phoneme_padding_mask,
+                audio_padding_mask=audio_padding_mask
             )
             
             all_scores.append(consistency_score.view(-1))

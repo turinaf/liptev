@@ -169,6 +169,59 @@ def test_positives_only_mask():
     assert selected.tolist() == [True, False]
 
 
+# --- audio path ---------------------------------------------------------------
+
+def test_bang_token_keeps_sequence_slot():
+    # "!" tokens have no .lab entry: zero supervised frames, but the sequence
+    # slot must still be consumed so later digits don't shift.
+    token_times = [([2], 0, 5), ([11], 0, 0), ([4], 10, 20)]  # digit, "!", digit
+    ranges = expand_token_ranges(token_times)
+    # ranges: [(0,0,5), (1,0,0), (2,10,20)]
+    targets, speech = build_alignment_targets(ranges, video_len=25, target_len=3)
+    assert targets[:5, 0].all()
+    assert targets[:, 1].sum() == 0            # "!" gets no frames
+    assert targets[10:20, 2].all()             # later digit at position 2
+
+def test_audio_forward_with_masks():
+    from models.verification_model import LipTextVerificationModel
+    from models.audio_encoder import AudioEncoder
+    torch.manual_seed(0)
+    B, T, L = 2, 20, 6
+    model = LipTextVerificationModel(vocab_size=13, feature_dim=64, lip_backbone_pretrained=False)
+
+    # audio of different real lengths, padded to batch max
+    real_lens = [16000, 9000]
+    audio = torch.zeros(B, 1, max(real_lens))
+    for i, n in enumerate(real_lens):
+        audio[i, :, :n] = torch.randn(1, n) * 0.1
+    audio_padding_mask = torch.arange(max(real_lens)).unsqueeze(0) >= torch.tensor(real_lens).unsqueeze(1)
+
+    video = torch.randn(B, T, 3, 48, 48)
+    phonemes = torch.randint(2, 13, (B, L))
+    video_padding_mask = torch.zeros(B, T, dtype=torch.bool); video_padding_mask[:, 15:] = True
+    phoneme_padding_mask = torch.zeros(B, L, dtype=torch.bool)
+
+    score, out = model(video, phonemes, audio,
+                       video_padding_mask=video_padding_mask,
+                       phoneme_padding_mask=phoneme_padding_mask,
+                       audio_padding_mask=audio_padding_mask)
+    assert torch.isfinite(score).all()
+    T_mel = out["audio_text"]["sim_matrix"].shape[1]
+    hop = model.audio_encoder.hop_length()
+    assert T_mel == max(real_lens) // hop + 1
+    # padded audio mel frames masked out of the similarity matrix
+    sim = out["audio_text"]["sim_matrix"]
+    n_valid = real_lens[0] // hop
+    assert torch.isinf(sim[1, n_valid:]).all() or (sim[1, n_valid:] <= -1e8).all()
+
+def test_mel_domain_mask_boundary():
+    from models.verification_model import LipTextVerificationModel
+    mask = torch.tensor([[False, False, False, True, True]])  # 3 real samples
+    mel_mask = LipTextVerificationModel._mel_domain_mask(mask, T_mel=5, hop_length=2)
+    # frame t valid iff t*2 < 3 -> t in {0, 1}
+    assert mel_mask.tolist() == [[False, False, True, True, True]]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

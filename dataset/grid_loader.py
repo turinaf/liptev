@@ -133,19 +133,20 @@ class GRIDDataset(Dataset):
             
         return torch.stack(tensor_list), true_len
 
-    def _load_audio(self, path):
-        # returns simple raw audio form
-        waveform, sr = torchaudio.load(path, backend="ffmpeg")
-        
-        # Flatten and truncate / pad to standard length depending on implementation
-        # For ~3 seconds of 16kHz audio = 48000 samples
-        target_len = sr * 3 
+    def _load_audio(self, path, video_len):
+        # Audio trimmed/padded to the span the kept frames cover (GRID is
+        # native 25 fps, 75 frames = 3 s). A fixed 3 s budget would desync
+        # audio and video for anything but full-length clips.
+        waveform, sr = torchaudio.load(path)
+        target_len = int(sr * video_len / 25)
+        if target_len <= 0:
+            return waveform, waveform.shape[1]
         if waveform.shape[1] > target_len:
             waveform = waveform[:, :target_len]
         else:
             pad = target_len - waveform.shape[1]
             waveform = torch.nn.functional.pad(waveform, (0, pad))
-        return waveform
+        return waveform, waveform.shape[1]
     def __len__(self):
         return len(self.samples)
 
@@ -172,8 +173,9 @@ class GRIDDataset(Dataset):
             ret_dict["word_times"] = word_times
 
         if self.use_audio and "audio" in sample:
-            audio_tensor = self._load_audio(sample["audio"])
+            audio_tensor, audio_len = self._load_audio(sample["audio"], video_len)
             ret_dict["audio"] = audio_tensor
+            ret_dict["audio_len"] = audio_len
 
         return ret_dict
 

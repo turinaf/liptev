@@ -172,8 +172,8 @@ def test_positives_only_mask():
 # --- audio path ---------------------------------------------------------------
 
 def test_bang_token_keeps_sequence_slot():
-    # "!" tokens have no .lab entry: zero supervised frames, but the sequence
-    # slot must still be consumed so later digits don't shift.
+    # Zero-length ranges (start == end) get zero supervised frames but keep
+    # the sequence slot so later tokens don't shift.
     token_times = [([2], 0, 5), ([11], 0, 0), ([4], 10, 20)]  # digit, "!", digit
     ranges = expand_token_ranges(token_times)
     # ranges: [(0,0,5), (1,0,0), (2,10,20)]

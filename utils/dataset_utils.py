@@ -61,7 +61,7 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             if dataset_name == "digit":
                 pos_indices = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in trans.split()]
                 # digit_times: [(token, start_frame, end_frame)] over the full
-                # token sequence — "!" slots carry (0, 0) ranges (zero frames)
+                # token sequence ("!" tokens carry their own .lab ranges)
                 token_times = [
                     ([digit_vocab.get(d, digit_vocab["<unk>"])], fs, fe)
                     for d, fs, fe in item.get('digit_times') or []

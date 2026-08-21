@@ -163,16 +163,15 @@ class DigitDataset(Dataset):
                     # Optional .lab boundary supervision. Frames beyond the
                     # max_frames window can't be supervised (and the visible
                     # content would contradict the transcript), so those
-                    # samples are skipped rather than truncated. .txt
-                    # transcripts may contain "!" tokens (non-speech events)
-                    # that .lab line 1 omits — compare on the digit tokens
-                    # only.
+                    # samples are skipped rather than truncated. .lab line 1
+                    # covers the full token sequence including "!" (each with
+                    # its own range), so the check is a token-for-token match.
                     lab_path = self._find_lab_file(subset_name, speaker_name, base_name)
                     if lab_path is not None:
                         lab_digits, lab_times = self._parse_lab_file(lab_path)
                         fps = self._speaker_fps(subset_name, speaker_name, base_name,
                                                  vid_path=vid_path, audio_path=audio_path)
-                        if lab_digits is None or lab_digits != [t for t in transcript.split() if t != "!"]:
+                        if lab_digits is None or lab_digits != transcript.split():
                             skipped_lab_mismatch += 1
                         elif any(int(round(e * fps)) > self.max_frames for _, e in lab_times):
                             skipped_lab_out_of_window += 1
@@ -270,23 +269,17 @@ class DigitDataset(Dataset):
         }
 
         # .lab seconds -> frames at the raw video's fps (frame indices are
-        # preserved by the 25 fps re-encode). The walk covers the FULL token
-        # sequence: "!" tokens (non-speech events without .lab entries) keep
-        # their sequence slot but receive zero supervised frames, so later
-        # digits don't shift positions.
+        # preserved by the 25 fps re-encode). "!" tokens carry real .lab
+        # ranges, so the walk is a plain 1:1 zip over the token sequence
+        # (lengths match — enforced by the loader's mismatch check).
         if "lab_times" in sample:
-            times = iter(sample["lab_times"])
             digit_times = []
-            for tok in sample["transcript"].split():
-                if tok == "!":
-                    digit_times.append((tok, 0, 0))
-                else:
-                    s, e = next(times)
-                    digit_times.append((
-                        tok,
-                        max(0, min(int(round(s * fps)), video_len)),
-                        max(0, min(int(round(e * fps)), video_len))
-                    ))
+            for tok, (s, e) in zip(sample["transcript"].split(), sample["lab_times"]):
+                digit_times.append((
+                    tok,
+                    max(0, min(int(round(s * fps)), video_len)),
+                    max(0, min(int(round(e * fps)), video_len))
+                ))
             ret_dict["digit_times"] = digit_times
 
         if self.use_audio and "audio" in sample:

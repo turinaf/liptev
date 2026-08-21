@@ -46,5 +46,12 @@ def evaluate_model(model, dataloader, device):
     from evaluation.metrics import compute_metrics
     metrics = compute_metrics(all_labels, all_scores, all_aligns)
     
-    print(f"ROC AUC: {metrics['roc_auc']:.4f}, Verify Acc: {metrics['verification_accuracy']:.4f}, Align Acc: {metrics['alignment_accuracy']:.4f}")
+    print(
+        f"Verify - ROC AUC: {metrics['roc_auc']:.4f}, Acc@0.5: {metrics['verification_accuracy']:.4f}, "
+        f"EER: {metrics['verification_eer']:.4f}, Acc@EER: {metrics['verification_accuracy_at_eer']:.4f}"
+    )
+    print(
+        f"Align  - ROC AUC: {metrics['alignment_roc_auc']:.4f}, EER: {metrics['alignment_eer']:.4f}, "
+        f"Acc@EER: {metrics['alignment_accuracy']:.4f}"
+    )
     return metrics

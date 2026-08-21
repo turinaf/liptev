@@ -88,10 +88,15 @@ def main():
                 print(
                     f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | "
                     f"Val ROC AUC: {metrics['roc_auc']:.4f} | "
+                    f"Val EER: {metrics['verification_eer']:.4f} | "
                     f"Val Ver Acc: {metrics['verification_accuracy']:.4f}"
                 )
                 writer.add_scalar('Logic/roc_auc', metrics["roc_auc"], epoch)
+                writer.add_scalar('Logic/align_roc_auc', metrics["alignment_roc_auc"], epoch)
+                writer.add_scalar('EER/verify', metrics["verification_eer"], epoch)
+                writer.add_scalar('EER/align', metrics["alignment_eer"], epoch)
                 writer.add_scalar('Accuracy/verify', metrics["verification_accuracy"], epoch)
+                writer.add_scalar('Accuracy/verify_at_eer', metrics["verification_accuracy_at_eer"], epoch)
                 
                 # Save checkpoint
                 torch.save(model.module.state_dict(), os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"))

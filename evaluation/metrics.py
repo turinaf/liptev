@@ -1,22 +1,70 @@
-from sklearn.metrics import roc_auc_score, accuracy_score
+from sklearn.metrics import roc_auc_score, roc_curve, accuracy_score
 import numpy as np
+
+def equal_error_rate(labels, scores):
+    """EER and the threshold at which it occurs.
+
+    Sweeps the ROC thresholds and picks the one where FAR (== FPR) is
+    closest to FRR (== 1 - TPR); the EER is their mean at that point, so
+    constant scores give chance level 0.5 and perfectly inverted scores
+    give 1.0. Degenerate single-label inputs also return 0.5 (nothing is
+    measurable), mirroring the 0.0 convention used for AUC.
+    """
+    labels_np = labels.cpu().numpy() if hasattr(labels, "cpu") else np.asarray(labels)
+    scores_np = scores.cpu().numpy() if hasattr(scores, "cpu") else np.asarray(scores)
+
+    if len(set(labels_np)) < 2:
+        return 0.5, float("nan")
+
+    fpr, tpr, thresholds = roc_curve(labels_np, scores_np)
+    fnr = 1.0 - tpr
+    idx = int(np.nanargmin(np.abs(fpr - fnr)))
+    eer = (fpr[idx] + fnr[idx]) / 2.0
+    return float(eer), float(thresholds[idx])
 
 def compute_metrics(labels, consistency_scores, align_scores):
     labels_np = labels.cpu().numpy()
     cons_np = consistency_scores.cpu().numpy()
     align_np = align_scores.cpu().numpy()
-    
+
     # Decisions (verify if >= 0.5)
     preds = (cons_np >= 0.5).astype(int)
-    align_preds = (align_np >= 0.5).astype(int) # simplistic align decision boundary
-    
-    auc = roc_auc_score(labels_np, cons_np) if len(set(labels_np)) > 1 else 0.0
+
+    two_classes = len(set(labels_np)) > 1
+
+    auc = roc_auc_score(labels_np, cons_np) if two_classes else 0.0
     acc = accuracy_score(labels_np, preds)
-    align_acc = accuracy_score(labels_np, align_preds)
-    
+
+    # Threshold-free EER for the verification score, plus the accuracy at
+    # the EER-optimal threshold: a fixed 0.5 cut is meaningless when the
+    # score distribution is not calibrated to it (acc@0.5 stays near
+    # chance while AUC is high).
+    cons_eer, cons_eer_thr = equal_error_rate(labels_np, cons_np)
+    if two_classes:
+        acc_at_eer = accuracy_score(labels_np, (cons_np >= cons_eer_thr).astype(int))
+    else:
+        acc_at_eer = 0.0
+
+    # The alignment score is a cosine-derived feature, not a calibrated
+    # classifier: its [0,1] mapping puts raw cosine 0 at 0.5, and deep
+    # features almost never sit below that. Judge it threshold-free (AUC,
+    # EER) and only report accuracy at its own EER threshold.
+    align_eer, align_eer_thr = equal_error_rate(labels_np, align_np)
+    align_auc = roc_auc_score(labels_np, align_np) if two_classes else 0.0
+    if two_classes:
+        align_acc = accuracy_score(labels_np, (align_np >= align_eer_thr).astype(int))
+    else:
+        align_acc = 0.0
+
     return {
         "roc_auc": auc,
         "verification_accuracy": acc,
+        "verification_eer": cons_eer,
+        "verification_accuracy_at_eer": acc_at_eer,
+        "alignment_roc_auc": align_auc,
+        "alignment_eer": align_eer,
         "alignment_accuracy": align_acc,
-        "score_margin": np.mean(np.abs(cons_np[labels_np == 1] - cons_np[labels_np == 0])) if len(set(labels_np)) > 1 else 0.0
+        # Mean separation between class score means (the old elementwise
+        # pos-neg subtraction crashed on unbalanced label counts).
+        "score_margin": float(abs(cons_np[labels_np == 1].mean() - cons_np[labels_np == 0].mean())) if two_classes else 0.0
     }

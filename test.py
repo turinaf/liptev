@@ -112,7 +112,7 @@ def test():
     print("Evaluating Model on Hold-out Test Set...")
     test_metrics = evaluate_model(model, test_loader, device)
     
-    print(f"\nFinal Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f}")
+    print(f"\nFinal Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f} | EER: {test_metrics['verification_eer']:.4f}")
 
 if __name__ == "__main__":
     test()

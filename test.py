@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from dataset.grid_loader import GRIDDataset
 from models.verification_model import LipTextVerificationModel
 from evaluation.evaluate import evaluate_model
+from evaluation.metrics import save_eer_thresholds
 from utils.dataset_utils import collate_fn_factory, Config
 from dataset.digit_loader import DigitDataset
 
@@ -111,7 +112,22 @@ def test():
     print("\n[--- Testing Phase ---]")
     print("Evaluating Model on Hold-out Test Set...")
     test_metrics = evaluate_model(model, test_loader, device)
-    
+
+    # Persist the EER calibration so single-pair inference (which
+    # auto-discovers this file next to the checkpoint) can make
+    # MATCH/MISMATCH decisions at the EER-optimal thresholds.
+    thresholds_path = os.path.join(output_dir_abs, "eer_thresholds.json")
+    save_eer_thresholds(
+        test_metrics,
+        {
+            "checkpoint": os.path.basename(model_save_path),
+            "dataset": cfg.dataset,
+            "n_samples": len(test_dataset),
+        },
+        thresholds_path,
+    )
+    print(f"EER thresholds saved to {thresholds_path}")
+
     print(f"\nFinal Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f} | EER: {test_metrics['verification_eer']:.4f}")
 
 if __name__ == "__main__":

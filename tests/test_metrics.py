@@ -4,6 +4,7 @@ Run: ~/miniconda3/envs/torch/bin/python -m pytest tests/test_metrics.py -q
 (or: python tests/test_metrics.py)
 """
 
+import json
 import os
 import sys
 
@@ -11,7 +12,12 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from evaluation.metrics import compute_metrics, equal_error_rate
+from evaluation.metrics import (
+    compute_metrics,
+    equal_error_rate,
+    load_eer_thresholds,
+    save_eer_thresholds,
+)
 
 
 def test_eer_perfect_separation():
@@ -96,3 +102,67 @@ def test_score_margin_unbalanced_labels():
     align = torch.tensor([0.6, 0.6, 0.6, 0.6, 0.6, 0.9, 0.9, 0.9])
     m = compute_metrics(labels, cons, align)
     assert abs(m["score_margin"] - (0.8 - 0.18)) < 1e-6
+
+
+def _separable_metrics():
+    labels = torch.tensor([0.0, 0.0, 1.0, 1.0])
+    cons = torch.tensor([0.2, 0.3, 0.8, 0.9])
+    align = torch.tensor([0.6, 0.65, 0.9, 0.95])
+    return compute_metrics(labels, cons, align)
+
+
+def test_compute_metrics_returns_eer_thresholds():
+    # Single-pair inference needs the EER-optimal cut, not just the rate.
+    m = _separable_metrics()
+    assert "verification_eer_threshold" in m
+    assert "alignment_eer_threshold" in m
+    cons = torch.tensor([0.2, 0.3, 0.8, 0.9])
+    align = torch.tensor([0.6, 0.65, 0.9, 0.95])
+    labels = torch.tensor([0.0, 0.0, 1.0, 1.0])
+    assert ((cons >= m["verification_eer_threshold"]).float() == labels).all()
+    assert ((align >= m["alignment_eer_threshold"]).float() == labels).all()
+
+
+def test_save_load_eer_thresholds_roundtrip(tmp_path):
+    m = _separable_metrics()
+    path = str(tmp_path / "eer_thresholds.json")
+    save_eer_thresholds(m, {"checkpoint": "best.pth", "dataset": "grid", "n_samples": 4}, path)
+
+    loaded = load_eer_thresholds(path)
+    assert loaded["checkpoint"] == "best.pth"
+    assert loaded["dataset"] == "grid"
+    assert loaded["n_samples"] == 4
+    assert isinstance(loaded["timestamp"], str) and loaded["timestamp"]
+    assert abs(loaded["verification"]["eer"] - m["verification_eer"]) < 1e-9
+    assert abs(loaded["verification"]["threshold"] - m["verification_eer_threshold"]) < 1e-9
+    assert abs(loaded["verification"]["accuracy_at_eer"] - m["verification_accuracy_at_eer"]) < 1e-9
+    assert abs(loaded["verification"]["roc_auc"] - m["roc_auc"]) < 1e-9
+    assert abs(loaded["alignment"]["eer"] - m["alignment_eer"]) < 1e-9
+    assert abs(loaded["alignment"]["threshold"] - m["alignment_eer_threshold"]) < 1e-9
+    assert abs(loaded["alignment"]["accuracy_at_eer"] - m["alignment_accuracy"]) < 1e-9
+
+
+def test_saved_thresholds_json_is_valid_and_nan_becomes_null(tmp_path):
+    # Degenerate eval (single class) yields NaN thresholds; json.dump would
+    # emit bare NaN (invalid JSON). It must serialize as null instead.
+    labels = torch.tensor([1.0, 1.0])
+    m = compute_metrics(labels, torch.tensor([0.2, 0.8]), torch.tensor([0.3, 0.7]))
+    assert m["verification_eer_threshold"] != m["verification_eer_threshold"]  # NaN
+
+    path = str(tmp_path / "eer_thresholds.json")
+    save_eer_thresholds(m, {"checkpoint": "c.pt", "dataset": "digit", "n_samples": 2}, path)
+
+    raw = json.loads(open(path).read())  # strict parse fails on bare NaN
+    assert raw["verification"]["threshold"] is None
+    assert raw["alignment"]["threshold"] is None
+    assert load_eer_thresholds(path)["alignment"]["threshold"] is None
+
+
+def test_load_eer_thresholds_missing_file_returns_none(tmp_path):
+    assert load_eer_thresholds(str(tmp_path / "nope.json")) is None
+
+
+def test_load_eer_thresholds_corrupt_file_returns_none(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not json")
+    assert load_eer_thresholds(str(path)) is None

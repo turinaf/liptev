@@ -1,4 +1,8 @@
 from sklearn.metrics import roc_auc_score, roc_curve, accuracy_score
+import json
+import os
+import time
+
 import numpy as np
 
 def equal_error_rate(labels, scores):
@@ -60,11 +64,60 @@ def compute_metrics(labels, consistency_scores, align_scores):
         "roc_auc": auc,
         "verification_accuracy": acc,
         "verification_eer": cons_eer,
+        "verification_eer_threshold": cons_eer_thr,
         "verification_accuracy_at_eer": acc_at_eer,
         "alignment_roc_auc": align_auc,
         "alignment_eer": align_eer,
+        "alignment_eer_threshold": align_eer_thr,
         "alignment_accuracy": align_acc,
         # Mean separation between class score means (the old elementwise
         # pos-neg subtraction crashed on unbalanced label counts).
         "score_margin": float(abs(cons_np[labels_np == 1].mean() - cons_np[labels_np == 0].mean())) if two_classes else 0.0
     }
+
+
+def _jsonable(value):
+    """NaN -> None so json.dump emits valid JSON (bare NaN is not parseable)."""
+    return None if value != value else float(value)
+
+
+def save_eer_thresholds(metrics, meta, path):
+    """Persist the EER calibration so single-pair inference can reuse it.
+
+    EER/Acc@EER are set-level metrics; a lone (video, transcript) trial has
+    no distribution to sweep. Evaluate over a labeled set once, store the
+    EER-optimal cuts here, and every later single-pair run decides
+    MATCH/MISMATCH against them instead of the uncalibrated raw score.
+    """
+    payload = dict(meta)
+    payload["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    payload["verification"] = {
+        "eer": _jsonable(metrics["verification_eer"]),
+        "threshold": _jsonable(metrics["verification_eer_threshold"]),
+        "accuracy_at_eer": _jsonable(metrics["verification_accuracy_at_eer"]),
+        "roc_auc": _jsonable(metrics["roc_auc"]),
+    }
+    payload["alignment"] = {
+        "eer": _jsonable(metrics["alignment_eer"]),
+        "threshold": _jsonable(metrics["alignment_eer_threshold"]),
+        "accuracy_at_eer": _jsonable(metrics["alignment_accuracy"]),
+        "roc_auc": _jsonable(metrics["alignment_roc_auc"]),
+    }
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    return path
+
+
+def load_eer_thresholds(path):
+    """Read an eer_thresholds.json, or None if absent/unparseable."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None

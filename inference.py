@@ -1,13 +1,20 @@
 import torch
 import cv2
 import numpy as np
+import os
+
+os.environ['GLOG_minloglevel'] = '2' # Suppress mediapipe C++ logging
+
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+from dataset.preprocessing import extract_lip_frames
 from models.verification_model import LipTextVerificationModel
 from utils.phoneme_converter import PhonemeConverter
 from utils.dataset_utils import Config
 from evaluation.metrics import load_eer_thresholds
 import argparse
 import sys
-import os
 import glob
 import re
 
@@ -147,19 +154,24 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     phone_tensor = torch.tensor(phones, dtype=torch.long).unsqueeze(0).to(device) # Add batch dimension
     phoneme_padding_mask = phone_tensor.eq(0)
 
-    print(f"Loading specific video frames from {video_path}...")
-    cap = cv2.VideoCapture(video_path)
-    frames = []
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret: break
-        # Assuming crop matches your 96x96 preprocessing requirement
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame = cv2.resize(frame, (96, 96))
-        frames.append(frame)
-        
-    cap.release()
+    print(f"Extracting lip-cropped frames from {video_path}...")
+    mp_model_path = cfg.mp_model_path if os.path.isabs(cfg.mp_model_path) else os.path.join(proj_root, cfg.mp_model_path)
+    if not os.path.exists(mp_model_path):
+        print(f"MediaPipe model not found at {mp_model_path}.")
+        sys.exit(1)
+    options = vision.FaceLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=mp_model_path),
+        output_face_blendshapes=False,
+        output_facial_transformation_matrixes=False,
+        num_faces=1
+    )
+    detector = vision.FaceLandmarker.create_from_options(options)
+
+    # Same preprocessing as training (pipeline/data_preparation.py):
+    # mediapipe lip crop (padding=12) resized to 96x96 RGB.
+    correct_orientation = (dataset == "digit")
+    frames = extract_lip_frames(video_path, detector=detector, correct_orientation=correct_orientation)
+
     if len(frames) == 0:
         print("Failed to load video frames.")
         sys.exit(1)
@@ -218,7 +230,7 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Lip-to-Text Inference Verification")
-    parser.add_argument("--video", type=str, required=True, help="Path to cropped MP4 lip file")
+    parser.add_argument("--video", type=str, required=True, help="Path to raw video file; the lip region is cropped automatically (MediaPipe)")
     parser.add_argument("--text", type=str, required=True, help="Ground truth or hypothesized text")
     parser.add_argument("--model", type=str, default=None, help="Optional checkpoint model path; if omitted, uses latest from config output_dir")
     parser.add_argument("--dataset", type=str, default=None, choices=["grid", "digit"], help="Optional dataset override; defaults to config dataset")

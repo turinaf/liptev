@@ -27,6 +27,8 @@ class Config:
             self.max_frames = cfg.get("max_frames", 75)
         self.output_dir = cfg.get("output_dir", "./exp/no_audio")
         self.lip_backbone_pretrained = cfg.get("lip_backbone_pretrained", True)
+        # MediaPipe face landmarker used to crop lip regions (pipeline + inference)
+        self.mp_model_path = cfg.get("mp_model_path", "face_landmarker.task")
         # Boundary-supervision losses
         self.lambda_ctc = cfg.get("lambda_ctc", 1.0)
         self.lambda_align = cfg.get("lambda_align", 1.0)

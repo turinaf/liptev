@@ -169,6 +169,102 @@ def test_positives_only_mask():
     assert selected.tolist() == [True, False]
 
 
+# --- alignment mode switch (sim / attn / both) --------------------------------
+
+def _mode_inputs(B=2, T=20, L=6, D=64):
+    torch.manual_seed(0)
+    lip = torch.randn(B, T, D)
+    text = torch.randn(B, L, D)
+    lip_pad = torch.zeros(B, T, dtype=torch.bool)
+    lip_pad[:, 15:] = True
+    text_pad = torch.zeros(B, L, dtype=torch.bool)
+    text_pad[:, 4:] = True
+    return lip, text, lip_pad, text_pad
+
+def test_alignment_mode_rejects_unknown():
+    from models.cross_modal_alignment import CrossModalAlignment
+    try:
+        CrossModalAlignment(64, mode="nope")
+    except ValueError:
+        return
+    raise AssertionError("unknown mode must raise ValueError")
+
+def test_alignment_mode_sim_matches_legacy_output():
+    # "sim" mode must reproduce the original cosine-only scoring exactly.
+    from models.cross_modal_alignment import CrossModalAlignment
+    lip, text, lip_pad, text_pad = _mode_inputs()
+    torch.manual_seed(1)
+    m = CrossModalAlignment(64, mode="sim")
+    out = m(lip, text, lip_padding_mask=lip_pad, text_padding_mask=text_pad)
+
+    lip_norm = torch.nn.functional.normalize(lip, dim=-1)
+    text_norm = torch.nn.functional.normalize(text, dim=-1)
+    sim = torch.bmm(lip_norm, text_norm.transpose(1, 2))
+    sim = sim.masked_fill(lip_pad.unsqueeze(-1), -1e9).masked_fill(text_pad.unsqueeze(1), -1e9)
+    word_scores = sim.max(dim=1).values
+    valid = (~text_pad).float()
+    raw = (word_scores * valid).sum(-1) / valid.sum(-1).clamp(min=1.0)
+    expected = ((raw + 1.0) / 2.0).clamp(0.0, 1.0)
+
+    assert torch.allclose(out["alignment_score"], expected, atol=1e-6)
+    assert out["sim_matrix"] is not None
+    assert out["aligned_features"] is None  # attention not run in "sim" mode
+    assert out["attn_weights"] is None
+
+def test_alignment_mode_attn():
+    from models.cross_modal_alignment import CrossModalAlignment
+    lip, text, lip_pad, text_pad = _mode_inputs()
+    m = CrossModalAlignment(64, mode="attn")
+    out = m(lip, text, lip_padding_mask=lip_pad, text_padding_mask=text_pad)
+
+    score = out["alignment_score"]
+    assert score.shape == (2,)
+    assert torch.isfinite(score).all() and (score >= 0).all() and (score <= 1).all()
+    assert out["sim_matrix"] is None           # no cosine matrix in "attn" mode
+    assert out["attn_weights"].shape == (2, 6, 20)  # B x L x T
+    assert out["word_scores"].shape == (2, 6)
+    # Padded word slots contribute nothing: score equals mean over valid words
+    ws = out["word_scores"]
+    raw = ws[:, :4].mean(dim=-1)
+    expected = ((raw + 1.0) / 2.0).clamp(0.0, 1.0)
+    assert torch.allclose(score, expected, atol=1e-6)
+
+def test_alignment_mode_both_averages():
+    from models.cross_modal_alignment import CrossModalAlignment
+    lip, text, lip_pad, text_pad = _mode_inputs()
+    torch.manual_seed(1)
+    both = CrossModalAlignment(64, mode="both")
+    sim_m = CrossModalAlignment(64, mode="sim")
+    attn_m = CrossModalAlignment(64, mode="attn")
+    both.load_state_dict(sim_m.state_dict())
+    attn_m.load_state_dict(sim_m.state_dict())
+
+    kwargs = dict(lip_padding_mask=lip_pad, text_padding_mask=text_pad)
+    s_both = both(lip, text, **kwargs)["alignment_score"]
+    s_sim = sim_m(lip, text, **kwargs)["alignment_score"]
+    s_attn = attn_m(lip, text, **kwargs)["alignment_score"]
+    assert torch.allclose(s_both, (s_sim + s_attn) / 2.0, atol=1e-6)
+
+def test_model_forward_with_each_mode():
+    from models.verification_model import LipTextVerificationModel
+    for mode in ("sim", "attn", "both"):
+        torch.manual_seed(0)
+        model = LipTextVerificationModel(vocab_size=13, feature_dim=64,
+                                         lip_backbone_pretrained=False,
+                                         alignment_mode=mode)
+        video = torch.randn(2, 12, 3, 48, 48)
+        phonemes = torch.randint(2, 13, (2, 5))
+        score, out = model(video, phonemes)
+        assert torch.isfinite(score).all(), f"mode={mode}"
+        # train.py reads sim_matrix from the no-audio align_out; in "attn"
+        # mode it is absent/None and the KL-loss guard must skip it.
+        sim = out.get("sim_matrix", out.get("lip_text", {}).get("sim_matrix"))
+        if mode == "attn":
+            assert sim is None, f"mode={mode}"
+        else:
+            assert sim is not None and torch.isfinite(sim[sim > -1e8]).all(), f"mode={mode}"
+
+
 # --- audio path ---------------------------------------------------------------
 
 def test_bang_token_keeps_sequence_slot():

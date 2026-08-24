@@ -17,5 +17,6 @@
     "lambda_ctc": 1.0,
     "lambda_align": 1.0,
     "alignment_temperature": 1.0,
+    "alignment_mode": "sim",
     "output_dir": "./exp/grid/no_audio"
 }

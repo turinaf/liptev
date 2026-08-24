@@ -33,6 +33,9 @@ class Config:
         self.lambda_ctc = cfg.get("lambda_ctc", 1.0)
         self.lambda_align = cfg.get("lambda_align", 1.0)
         self.alignment_temperature = cfg.get("alignment_temperature", 1.0)
+        # Alignment scoring path: "sim" (cosine matrix), "attn"
+        # (cross-attention), or "both" (average)
+        self.alignment_mode = cfg.get("alignment_mode", "sim")
         # Fallback fps for .lab second->frame conversion when meta.json is absent
         self.digit_source_fps = cfg.get("digit_source_fps", 29.87)
 

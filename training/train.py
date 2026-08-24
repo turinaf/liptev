@@ -96,9 +96,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
 
         # Frame-level alignment supervision — positive pairs with boundary
         # data, on speech frames only. sim_matrix lives under 'lip_text' when
-        # audio is enabled and at the top level otherwise.
-        if alignment_targets is not None and speech_mask is not None and has_align_target is not None:
-            sim_source = align_out.get('lip_text', align_out)
+        # audio is enabled and at the top level otherwise. Unavailable in
+        # alignment mode "attn" (no cosine matrix is computed there).
+        sim_source = align_out.get('lip_text', align_out)
+        if alignment_targets is not None and speech_mask is not None and has_align_target is not None \
+                and sim_source.get('sim_matrix') is not None:
             frame_valid = speech_mask & has_align_target.unsqueeze(1).bool() & positive_mask.unsqueeze(1)
             if video_padding_mask is not None:
                 frame_valid = frame_valid & ~video_padding_mask

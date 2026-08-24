@@ -116,7 +116,8 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     model = LipTextVerificationModel(
         vocab_size=vocab_size,
         feature_dim=256,
-        lip_backbone_pretrained=cfg.lip_backbone_pretrained
+        lip_backbone_pretrained=cfg.lip_backbone_pretrained,
+        alignment_mode=getattr(cfg, "alignment_mode", "sim")
     ).to(device)
 
     checkpoint = torch.load(resolved_model_path, map_location=device)

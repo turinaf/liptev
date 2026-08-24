@@ -7,16 +7,17 @@ from .cross_modal_alignment import CrossModalAlignment
 from .audio_encoder import AudioEncoder
 
 class LipTextVerificationModel(nn.Module):
-    def __init__(self, vocab_size=50, feature_dim=256, lip_backbone_pretrained=True):
+    def __init__(self, vocab_size=50, feature_dim=256, lip_backbone_pretrained=True,
+                 alignment_mode="sim"):
         super(LipTextVerificationModel, self).__init__()
         self.vocab_size = vocab_size
         self.lip_encoder = LipEncoder(feature_dim, backbone_pretrained=lip_backbone_pretrained)
         self.text_encoder = TextEncoder(vocab_size=vocab_size, feature_dim=feature_dim)
         self.audio_encoder = AudioEncoder(feature_dim)
 
-        self.alignment_lip_text = CrossModalAlignment(feature_dim)
-        self.alignment_audio_text = CrossModalAlignment(feature_dim)
-        self.alignment_lip_audio = CrossModalAlignment(feature_dim)
+        self.alignment_lip_text = CrossModalAlignment(feature_dim, mode=alignment_mode)
+        self.alignment_audio_text = CrossModalAlignment(feature_dim, mode=alignment_mode)
+        self.alignment_lip_audio = CrossModalAlignment(feature_dim, mode=alignment_mode)
 
         # CTC predictor: per-frame token logits over lip features. blank is
         # appended after the vocab (indices 0..vocab_size-1 are real tokens),

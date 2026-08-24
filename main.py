@@ -66,7 +66,8 @@ def main():
             vocab_size = 41  # PhonemeConverter.vocab_size (39+pad+unk)
         model = LipTextVerificationModel(
             vocab_size=vocab_size,
-            lip_backbone_pretrained=config.lip_backbone_pretrained
+            lip_backbone_pretrained=config.lip_backbone_pretrained,
+            alignment_mode=config.alignment_mode
         ).to(device)
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
         

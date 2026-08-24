@@ -85,7 +85,8 @@ def test():
     model = LipTextVerificationModel(
         vocab_size=vocab_size,
         feature_dim=256,
-        lip_backbone_pretrained=cfg.lip_backbone_pretrained
+        lip_backbone_pretrained=cfg.lip_backbone_pretrained,
+        alignment_mode=getattr(cfg, "alignment_mode", "sim")
     ).to(device)
     
     model_save_path = _resolve_latest_checkpoint(output_dir_abs)

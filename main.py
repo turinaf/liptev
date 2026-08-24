@@ -14,6 +14,7 @@ from evaluation.evaluate import evaluate_model
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from utils.dataset_utils import Config, collate_fn_factory
+from utils.checkpoint import save_checkpoint, check_alignment_supervision
 
 
 
@@ -44,7 +45,8 @@ def main():
             device = torch.device("cuda:0")
 
         config = Config()
-        
+        check_alignment_supervision(config.alignment_mode, config.lambda_align)
+
         if config.dataset == "digit":
             train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps)
             val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps)
@@ -99,8 +101,13 @@ def main():
                 writer.add_scalar('Accuracy/verify', metrics["verification_accuracy"], epoch)
                 writer.add_scalar('Accuracy/verify_at_eer', metrics["verification_accuracy_at_eer"], epoch)
                 
-                # Save checkpoint
-                torch.save(model.module.state_dict(), os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"))
+                # Save checkpoint (mode stamped next to the weights so eval
+                # runs can't silently score it under a different mode)
+                save_checkpoint(
+                    model.module.state_dict(),
+                    os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"),
+                    config.alignment_mode,
+                )
     finally:
         if writer is not None:
             writer.close()

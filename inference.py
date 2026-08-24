@@ -12,6 +12,7 @@ from dataset.preprocessing import extract_lip_frames
 from models.verification_model import LipTextVerificationModel
 from utils.phoneme_converter import PhonemeConverter
 from utils.dataset_utils import Config
+from utils.checkpoint import resolve_alignment_mode
 from evaluation.metrics import load_eer_thresholds
 import argparse
 import sys
@@ -111,15 +112,6 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     
     transcript = parse_input_text(transcript, dataset)
     
-    vocab_size = 13 if dataset == "digit" else 41
-    # Needs to match architecture in main
-    model = LipTextVerificationModel(
-        vocab_size=vocab_size,
-        feature_dim=256,
-        lip_backbone_pretrained=cfg.lip_backbone_pretrained,
-        alignment_mode=getattr(cfg, "alignment_mode", "sim")
-    ).to(device)
-
     checkpoint = torch.load(resolved_model_path, map_location=device)
     state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
 
@@ -129,6 +121,19 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
             clean_state_dict[k[7:]] = v
         else:
             clean_state_dict[k] = v
+
+    # The checkpoint's stamp wins over config: the classifier and the EER
+    # calibration were produced under the checkpoint's scoring mode.
+    alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
+
+    vocab_size = 13 if dataset == "digit" else 41
+    # Needs to match architecture in main
+    model = LipTextVerificationModel(
+        vocab_size=vocab_size,
+        feature_dim=256,
+        lip_backbone_pretrained=cfg.lip_backbone_pretrained,
+        alignment_mode=alignment_mode
+    ).to(device)
 
     model.load_state_dict(clean_state_dict)
     model.eval()

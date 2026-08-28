@@ -102,10 +102,7 @@ def test():
     alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
 
     print("Initializing model...")
-    if cfg.dataset == "digit":
-        vocab_size = 13  # 0-9, !, <pad>, <unk>
-    else:
-        vocab_size = 41  # PhonemeConverter vocab used in training
+    vocab_size = 41  # shared ARPABET vocab (39 + pad + unk); digit transcripts map into it via pinyin
     model = LipTextVerificationModel(
         vocab_size=vocab_size,
         feature_dim=256,

@@ -24,7 +24,7 @@ This repository contains a PyTorch implementation for a Cross-Modal Lip-to-Text 
 ├── pipeline/
 │   └── data_preparation.py     # End-to-end dataset preprocessing
 ├── utils/
-│   ├── phoneme_converter.py    # Maps English transcripts to integer phoneme vocabulary
+│   ├── phoneme_converter.py    # Maps English (g2p_en) and digit (pinyin) transcripts to integer phoneme vocabulary
 │   └── negative_sampler.py     # Generates bad transcripts for contrastive training
 ├── main.py                     # Training orchestrator & evaluation suite
 ├── inference.py                # External inference execution script 

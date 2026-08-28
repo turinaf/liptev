@@ -1,6 +1,19 @@
 import re
 import nltk
 # nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+
+# Shared ARPABET vocabulary: 39 phonemes + <pad> + <unk>. Both converters
+# (English GRID transcripts, Mandarin digit pinyin) index into this one
+# space, so text-encoder embeddings and the CTC head stay dataset-agnostic.
+ARPABET = [
+    "<pad>", "<unk>",
+    "AA","AE","AH","AO","AW","AY",
+    "B","CH","D","DH","EH","ER","EY",
+    "F","G","HH","IH","IY","JH","K","L",
+    "M","N","NG","OW","OY","P","R","S",
+    "SH","T","TH","UH","UW","V","W","Y","Z","ZH"
+]
+
 class PhonemeConverter:
     def __init__(self):
         try:
@@ -9,16 +22,7 @@ class PhonemeConverter:
         except ImportError:
             raise ImportError("pip install g2p_en")
 
-        arpabet = [
-            "<pad>", "<unk>",
-            "AA","AE","AH","AO","AW","AY",
-            "B","CH","D","DH","EH","ER","EY",
-            "F","G","HH","IH","IY","JH","K","L",
-            "M","N","NG","OW","OY","P","R","S",
-            "SH","T","TH","UH","UW","V","W","Y","Z","ZH"
-        ]
-
-        self.vocab = {p:i for i,p in enumerate(arpabet)}
+        self.vocab = {p:i for i,p in enumerate(ARPABET)}
 
     def normalize_text(self, text):
         text = text.lower()
@@ -67,6 +71,67 @@ class PhonemeConverter:
     def flatten_per_word(per_word):
         """Concatenate per-word ids into the full target/encoder sequence."""
         return [idx for _, ids in per_word for idx in ids]
+
+    @property
+    def vocab_size(self):
+        return len(self.vocab)
+
+
+# Mandarin digits: toneless pinyin syllable -> ARPABET phone approximation.
+# Initials map to their closest English phones (q->CH, j->JH, y->Y, w->W);
+# finals decompose articulatorily (an->AA N, ing->IH NG, iu->IY OW,
+# i->IY, u->UW, a->AA, er->ER). This replaces the old opaque 10-class digit
+# vocabulary with pronunciation-level targets, mirroring what g2p_en does
+# for English GRID transcripts.
+DIGIT_PINYIN_PHONEMES = {
+    "0": ("líng", ["L", "IH", "NG"]),
+    "1": ("yī",   ["Y", "IY"]),
+    "2": ("èr",   ["ER"]),
+    "3": ("sān",  ["S", "AA", "N"]),
+    "4": ("sì",   ["S", "IY"]),
+    "5": ("wǔ",   ["W", "UW"]),
+    "6": ("liù",  ["L", "IY", "OW"]),
+    "7": ("qī",   ["CH", "IY"]),
+    "8": ("bā",   ["B", "AA"]),
+    "9": ("jiǔ",  ["JH", "IY", "OW"]),
+}
+
+class DigitPinyinConverter:
+    """Digit transcripts -> ARPABET ids via toneless pinyin pronunciation.
+
+    The digit dataset's counterpart of PhonemeConverter: "7" is pronounced
+    qī and articulated as CH IY rather than treated as an opaque word class,
+    so the text encoder and the CTC head see sub-lexical units the lips
+    actually produce. Shares the ARPABET vocabulary with English transcripts
+    (vocab_size 41).
+
+    "!" (a pause marker: it carries its own .lab range but no articulation)
+    maps to an EMPTY phoneme group — CTC blank absorbs the pause and the
+    alignment loss gets no supervised frames there. Groups stay 1:1 with
+    transcript tokens so they can be zipped against digit_times.
+    """
+
+    def __init__(self):
+        self.vocab = {p: i for i, p in enumerate(ARPABET)}
+        unknown = sorted({p for _, phones in DIGIT_PINYIN_PHONEMES.values() for p in phones
+                          if p not in self.vocab})
+        if unknown:
+            raise ValueError(f"pinyin mapping uses phones outside ARPABET: {unknown}")
+
+    def token_to_phoneme_indices(self, token):
+        """Phoneme ids for one transcript token ('0'-'9' or '!')."""
+        entry = DIGIT_PINYIN_PHONEMES.get(token)
+        return [self.vocab[p] for p in entry[1]] if entry else []
+
+    def transcript_to_phoneme_indices_per_token(self, transcript):
+        """Per-token [(token, [phoneme_ids])] — one group per transcript
+        token, empty lists included, so the output zips 1:1 with digit_times."""
+        return [(tok, self.token_to_phoneme_indices(tok)) for tok in transcript.split()]
+
+    @staticmethod
+    def flatten_per_token(per_token):
+        """Concatenate per-token ids into the full target/encoder sequence."""
+        return [idx for _, ids in per_token for idx in ids]
 
     @property
     def vocab_size(self):

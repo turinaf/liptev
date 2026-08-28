@@ -10,7 +10,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from dataset.preprocessing import extract_lip_frames
 from models.verification_model import LipTextVerificationModel
-from utils.phoneme_converter import PhonemeConverter
+from utils.phoneme_converter import PhonemeConverter, DigitPinyinConverter
 from utils.dataset_utils import Config
 from utils.checkpoint import resolve_alignment_mode
 from evaluation.metrics import load_eer_thresholds
@@ -126,7 +126,7 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     # calibration were produced under the checkpoint's scoring mode.
     alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
 
-    vocab_size = 13 if dataset == "digit" else 41
+    vocab_size = 41  # shared ARPABET vocab (39 + pad + unk) for both datasets
     # Needs to match architecture in main
     model = LipTextVerificationModel(
         vocab_size=vocab_size,
@@ -140,11 +140,9 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
 
     print(f"Parsing transcript: '{transcript}'")
     if dataset == "digit":
-        digit_vocab = {str(i): i+1 for i in range(10)} 
-        digit_vocab["!"] = 11
-        digit_vocab["<pad>"] = 0
-        digit_vocab["<unk>"] = 12
-        phones = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in transcript.split()]
+        digit_converter = DigitPinyinConverter()
+        phones = digit_converter.flatten_per_token(
+            digit_converter.transcript_to_phoneme_indices_per_token(transcript))
     else:
         converter = PhonemeConverter()
         # Per-word phonemization — the same source the model is trained on

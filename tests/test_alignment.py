@@ -158,7 +158,9 @@ def test_model_forward_grid_vocab():
     _smoke_forward(vocab_size=41)
 
 def test_model_forward_digit_vocab():
-    _smoke_forward(vocab_size=13)
+    # Digit transcripts map to pinyin phonemes in the SAME shared ARPABET
+    # vocab as GRID (39 + pad + unk) — no separate 13-token digit vocab.
+    _smoke_forward(vocab_size=41)
 
 def test_positives_only_mask():
     # The training loop's CTC mask: negatives must be excluded even when valid.
@@ -249,11 +251,11 @@ def test_model_forward_with_each_mode():
     from models.verification_model import LipTextVerificationModel
     for mode in ("sim", "attn", "both"):
         torch.manual_seed(0)
-        model = LipTextVerificationModel(vocab_size=13, feature_dim=64,
+        model = LipTextVerificationModel(vocab_size=41, feature_dim=64,
                                          lip_backbone_pretrained=False,
                                          alignment_mode=mode)
         video = torch.randn(2, 12, 3, 48, 48)
-        phonemes = torch.randint(2, 13, (2, 5))
+        phonemes = torch.randint(2, 41, (2, 5))
         score, out = model(video, phonemes)
         assert torch.isfinite(score).all(), f"mode={mode}"
         # train.py reads sim_matrix from the no-audio align_out; in "attn"
@@ -283,7 +285,7 @@ def test_audio_forward_with_masks():
     from models.audio_encoder import AudioEncoder
     torch.manual_seed(0)
     B, T, L = 2, 20, 6
-    model = LipTextVerificationModel(vocab_size=13, feature_dim=64, lip_backbone_pretrained=False)
+    model = LipTextVerificationModel(vocab_size=41, feature_dim=64, lip_backbone_pretrained=False)
 
     # audio of different real lengths, padded to batch max
     real_lens = [16000, 9000]
@@ -293,7 +295,7 @@ def test_audio_forward_with_masks():
     audio_padding_mask = torch.arange(max(real_lens)).unsqueeze(0) >= torch.tensor(real_lens).unsqueeze(1)
 
     video = torch.randn(B, T, 3, 48, 48)
-    phonemes = torch.randint(2, 13, (B, L))
+    phonemes = torch.randint(2, 41, (B, L))
     video_padding_mask = torch.zeros(B, T, dtype=torch.bool); video_padding_mask[:, 15:] = True
     phoneme_padding_mask = torch.zeros(B, L, dtype=torch.bool)
 

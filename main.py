@@ -62,10 +62,7 @@ def main():
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
         val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
         
-        if config.dataset == "digit":
-            vocab_size = 13  # 0-9, !, <pad>, <unk>
-        else:
-            vocab_size = 41  # PhonemeConverter.vocab_size (39+pad+unk)
+        vocab_size = 41  # shared ARPABET vocab (39 + pad + unk); digit transcripts map into it via pinyin
         model = LipTextVerificationModel(
             vocab_size=vocab_size,
             lip_backbone_pretrained=config.lip_backbone_pretrained,

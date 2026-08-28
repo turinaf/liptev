@@ -306,13 +306,12 @@ if __name__ == "__main__":
         dataset = DigitDataset(data_dir=test_data_dir, split='train', max_frames=config.max_frames, use_audio=config.use_audio)
         print(f"\nSuccessfully loaded train split with {len(dataset)} samples.")
 
-        digit_vocab = {str(i): i + 1 for i in range(10)}
-        digit_vocab["!"] = 11
-        digit_vocab["<pad>"] = 0
-        digit_vocab["<unk>"] = 12
+        from utils.phoneme_converter import DigitPinyinConverter
+        converter = DigitPinyinConverter()
 
         def transcript_to_sequence(transcript):
-            return [digit_vocab.get(token, digit_vocab["<unk>"]) for token in transcript.split()]
+            return converter.flatten_per_token(
+                converter.transcript_to_phoneme_indices_per_token(transcript))
         
         if len(dataset) > 0:
             print("\n--- Inspecting Samples ---")

@@ -1,7 +1,7 @@
 import os
 import json
 import torch
-from utils.phoneme_converter import PhonemeConverter
+from utils.phoneme_converter import PhonemeConverter, DigitPinyinConverter
 from utils.negative_sampler import NegativeSampler
 from utils.alignment import expand_token_ranges, build_alignment_targets
 
@@ -40,13 +40,11 @@ class Config:
         self.digit_source_fps = cfg.get("digit_source_fps", 29.87)
 
 def collate_fn_factory(dataset_name, transcript_pool=None):
+    # Digits go through the pinyin converter (pronunciation-level tokens in
+    # the shared ARPABET vocab); GRID through g2p_en. Same vocab size either way.
+    digit_converter = DigitPinyinConverter() if dataset_name == "digit" else None
     converter = PhonemeConverter() if dataset_name != "digit" else None
     global_sampler = NegativeSampler(transcript_pool or [], dataset_name=dataset_name)
-
-    digit_vocab = {str(i): i+1 for i in range(10)}
-    digit_vocab["!"] = 11
-    digit_vocab["<pad>"] = 0
-    digit_vocab["<unk>"] = 12
 
     def collate_fn(batch):
         all_trans = [item['transcript'] for item in batch]
@@ -64,12 +62,14 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             # --- POSITIVE SAMPLE ---
             videos.append(vid)
             if dataset_name == "digit":
-                pos_indices = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in trans.split()]
+                per_token = digit_converter.transcript_to_phoneme_indices_per_token(trans)
+                pos_indices = digit_converter.flatten_per_token(per_token)
                 # digit_times: [(token, start_frame, end_frame)] over the full
-                # token sequence ("!" tokens carry their own .lab ranges)
+                # token sequence — the zip is 1:1 (empty "!" groups keep it
+                # aligned and yield no alignment frames).
                 token_times = [
-                    ([digit_vocab.get(d, digit_vocab["<unk>"])], fs, fe)
-                    for d, fs, fe in item.get('digit_times') or []
+                    (ids, fs, fe)
+                    for (_, ids), (_, fs, fe) in zip(per_token, item.get('digit_times') or [])
                 ]
             else:
                 per_word = converter.text_to_phoneme_indices_per_word(trans)
@@ -93,7 +93,8 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             videos.append(vid)
             neg_trans = sampler.sample(trans)
             if dataset_name == "digit":
-                neg_indices = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in neg_trans.split()]
+                neg_indices = digit_converter.flatten_per_token(
+                    digit_converter.transcript_to_phoneme_indices_per_token(neg_trans))
             else:
                 neg_indices = converter.flatten_per_word(converter.text_to_phoneme_indices_per_word(neg_trans))
             phonemes_indices_list.append(torch.tensor(neg_indices, dtype=torch.long))

@@ -158,9 +158,9 @@ def test_model_forward_grid_vocab():
     _smoke_forward(vocab_size=41)
 
 def test_model_forward_digit_vocab():
-    # Digit transcripts map to pinyin phonemes in the SAME shared ARPABET
-    # vocab as GRID (39 + pad + unk) — no separate 13-token digit vocab.
-    _smoke_forward(vocab_size=41)
+    # Digit transcripts map into their own compact vocab: <pad>/<unk> +
+    # the 15 phones the digit pronunciations use (no shared 41 with GRID).
+    _smoke_forward(vocab_size=17)
 
 def test_positives_only_mask():
     # The training loop's CTC mask: negatives must be excluded even when valid.

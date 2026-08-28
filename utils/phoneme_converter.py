@@ -2,9 +2,10 @@ import re
 import nltk
 # nltk.download('averaged_perceptron_tagger_eng', quiet=True)
 
-# Shared ARPABET vocabulary: 39 phonemes + <pad> + <unk>. Both converters
-# (English GRID transcripts, Mandarin digit pinyin) index into this one
-# space, so text-encoder embeddings and the CTC head stay dataset-agnostic.
+# Full ARPABET vocabulary for English (GRID) transcripts: 39 phonemes +
+# <pad> + <unk>. Digit transcripts use their own compact DIGIT_ARPABET
+# (only the phones digits actually pronounce), so each dataset's text
+# encoder embeddings and CTC head are sized to what it transcribes.
 ARPABET = [
     "<pad>", "<unk>",
     "AA","AE","AH","AO","AW","AY",
@@ -13,6 +14,7 @@ ARPABET = [
     "M","N","NG","OW","OY","P","R","S",
     "SH","T","TH","UH","UW","V","W","Y","Z","ZH"
 ]
+GRID_VOCAB_SIZE = len(ARPABET)  # 41
 
 class PhonemeConverter:
     def __init__(self):
@@ -96,14 +98,24 @@ DIGIT_PINYIN_PHONEMES = {
     "9": ("jiǔ",  ["JH", "IY", "OW"]),
 }
 
+# Compact digit-only vocab: <pad>/<unk> + exactly the phones the digit
+# pronunciations above use (15 phones -> 17 tokens). Derived from the table
+# (sorted for determinism) so it can never drift when a pronunciation
+# changes; every mapped phone is in the vocab by construction.
+DIGIT_ARPABET = [
+    "<pad>", "<unk>",
+    *sorted({p for _, phones in DIGIT_PINYIN_PHONEMES.values() for p in phones}),
+]
+DIGIT_VOCAB_SIZE = len(DIGIT_ARPABET)  # 17
+
 class DigitPinyinConverter:
     """Digit transcripts -> ARPABET ids via toneless pinyin pronunciation.
 
     The digit dataset's counterpart of PhonemeConverter: "7" is pronounced
     qī and articulated as CH IY rather than treated as an opaque word class,
     so the text encoder and the CTC head see sub-lexical units the lips
-    actually produce. Shares the ARPABET vocabulary with English transcripts
-    (vocab_size 41).
+    actually produce. Indexes into the compact digit-only vocabulary
+    DIGIT_ARPABET (vocab_size 17: <pad>/<unk> + the 15 phones digits use).
 
     "!" (a pause marker: it carries its own .lab range but no articulation)
     maps to an EMPTY phoneme group — CTC blank absorbs the pause and the
@@ -112,11 +124,7 @@ class DigitPinyinConverter:
     """
 
     def __init__(self):
-        self.vocab = {p: i for i, p in enumerate(ARPABET)}
-        unknown = sorted({p for _, phones in DIGIT_PINYIN_PHONEMES.values() for p in phones
-                          if p not in self.vocab})
-        if unknown:
-            raise ValueError(f"pinyin mapping uses phones outside ARPABET: {unknown}")
+        self.vocab = {p: i for i, p in enumerate(DIGIT_ARPABET)}
 
     def token_to_phoneme_indices(self, token):
         """Phoneme ids for one transcript token ('0'-'9' or '!')."""

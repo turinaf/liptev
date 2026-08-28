@@ -11,17 +11,28 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.phoneme_converter import DigitPinyinConverter, ARPABET
+from utils.phoneme_converter import DigitPinyinConverter, ARPABET, DIGIT_PINYIN_PHONEMES
 from utils.alignment import expand_token_ranges, build_alignment_targets
 
 
-def test_all_digits_map_to_shared_vocab():
+def test_digit_vocab_is_compact_and_covers_all_pronunciations():
+    # Digit-only vocab: <pad>/<unk> + exactly the phones the 10 digit
+    # pronunciations use (15 phones -> 17 tokens), not the shared 41.
     conv = DigitPinyinConverter()
-    assert conv.vocab_size == len(ARPABET) == 41  # same vocab as PhonemeConverter
+    used = {p for _, (_, phones) in DIGIT_PINYIN_PHONEMES.items() for p in phones}
+    assert conv.vocab_size == 17
+    assert set(conv.vocab) == {"<pad>", "<unk>"} | used
+    assert conv.vocab["<pad>"] == 0 and conv.vocab["<unk>"] == 1
     for d in "0123456789":
         ids = conv.token_to_phoneme_indices(d)
         assert len(ids) >= 1, f"digit {d} has no pronunciation"
         assert all(0 < i < conv.vocab_size for i in ids), f"digit {d} -> {ids}"
+
+
+def test_vocab_size_constants():
+    from utils.phoneme_converter import DIGIT_VOCAB_SIZE, GRID_VOCAB_SIZE
+    assert GRID_VOCAB_SIZE == len(ARPABET) == 41
+    assert DIGIT_VOCAB_SIZE == DigitPinyinConverter().vocab_size == 17
 
 
 def test_explicit_pinyin_mappings():
@@ -101,7 +112,7 @@ def test_collate_digit_batch_end_to_end():
     # B = 2 items x (1 pos + 1 neg)
     assert out["label"].tolist() == [1.0, 0.0, 1.0, 0.0]
     ids = out["phonemes"]
-    assert ids.min() >= 0 and ids.max() < 41
+    assert ids.min() >= 0 and ids.max() < 17
     # positive rows: flattened digit-pinyin lengths (row 0 excludes "!")
     assert out["phoneme_padding_mask"][0].sum() == ids.shape[1] - flat_len("3 0 8 4 ! 6 8 !")
     assert out["phoneme_padding_mask"][2].sum() == ids.shape[1] - flat_len("7 1 9 2 5 0 3 6")

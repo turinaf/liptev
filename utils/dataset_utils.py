@@ -40,8 +40,8 @@ class Config:
         self.digit_source_fps = cfg.get("digit_source_fps", 29.87)
 
 def collate_fn_factory(dataset_name, transcript_pool=None):
-    # Digits go through the pinyin converter (pronunciation-level tokens in
-    # the shared ARPABET vocab); GRID through g2p_en. Same vocab size either way.
+    # Digits go through the pinyin converter (compact digit-only ARPABET
+    # vocab); GRID through g2p_en (full 39-phone vocab).
     digit_converter = DigitPinyinConverter() if dataset_name == "digit" else None
     converter = PhonemeConverter() if dataset_name != "digit" else None
     global_sampler = NegativeSampler(transcript_pool or [], dataset_name=dataset_name)

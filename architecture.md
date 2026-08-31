@@ -255,7 +255,7 @@ flowchart TB
     LT & AT2 & LA --> COMB
     CTCH --> COMB
 
-    CLS["MLP classifier<br/>Linear 772→128 → ReLU<br/>→ Linear 128→1 → Sigmoid"]
+    CLS["MLP classifier<br/>Linear 772→128 → ReLU<br/>→ Linear 128→1 (sigmoid in forward)"]
     COMB --> CLS
     SCORE["consistency_score ∈ [0,1]"]
     CLS --> SCORE
@@ -315,7 +315,7 @@ Four losses are summed per batch (each batch contains interleaved positive/negat
 
 ```mermaid
 flowchart LR
-    SCORE["consistency_score"] --> BCE["L_bce = BCE(score, label)<br/>all pairs"]
+    SCORE["consistency_logit"] --> BCE["L_bce = BCEWithLogits(logit, label)<br/>all pairs"]
     ASCORE["alignment_score (weighted)"] --> CON["L_contrastive =<br/>label·(1 − score)<br/>+ (1−label)·clamp(score − 0.5, min 0)<br/>margin-style hinge"]
     CTCN["ctc_nll_per_token"] --> CTC["L_ctc = mean NLL<br/>positive pairs only"]
     SIM["sim_matrix (lip↔text)"] --> ALN["L_align = frame→token<br/>cross-entropy vs one-hot<br/>alignment_targets<br/>speech frames, positives<br/>with boundary data only"]

@@ -26,12 +26,14 @@ class LipTextVerificationModel(nn.Module):
         self.ctc_head = nn.Linear(feature_dim, vocab_size + 1)
 
         # feature_dim*3 (pooled lip/text/audio) + 3 alignment scores + 1
-        # per-token CTC log-likelihood.
+        # per-token CTC log-likelihood. Emits a raw logit; forward applies
+        # sigmoid so training can use BCEWithLogitsLoss on the logit (a
+        # post-sigmoid BCELoss gets dead gradients once the sigmoid
+        # saturates) while eval keeps a [0, 1] probability.
         self.classifier = nn.Sequential(
             nn.Linear(feature_dim * 3 + 4, 128),
             nn.ReLU(),
-            nn.Linear(128, 1),
-            nn.Sigmoid()
+            nn.Linear(128, 1)
         )
 
     def _ctc_terms(self, lip_feats, phoneme_seqs, video_padding_mask, phoneme_padding_mask):
@@ -128,7 +130,8 @@ class LipTextVerificationModel(nn.Module):
             # Combine features
             combined = torch.cat([lip_pool, text_pool, audio_pool, score_lt, score_at, score_la, ctc_logp_per_token], dim=-1)
 
-            consistency_score = self.classifier(combined)
+            consistency_logit = self.classifier(combined)
+            consistency_score = torch.sigmoid(consistency_logit)
 
             # Weighted alignment score
             final_align_score = 0.4 * align_lt["alignment_score"] + 0.4 * align_at["alignment_score"] + 0.2 * align_la["alignment_score"]
@@ -155,11 +158,13 @@ class LipTextVerificationModel(nn.Module):
             score_la = torch.zeros_like(score_lt)
 
             combined = torch.cat([lip_pool, text_pool, audio_pool, score_lt, score_at, score_la, ctc_logp_per_token], dim=-1)
-            consistency_score = self.classifier(combined)
+            consistency_logit = self.classifier(combined)
+            consistency_score = torch.sigmoid(consistency_logit)
 
             align_out = align_lt
 
         align_out["ctc_nll_per_token"] = ctc_nll_per_token
         align_out["ctc_valid"] = ctc_valid
+        align_out["consistency_logit"] = consistency_logit
 
         return consistency_score, align_out

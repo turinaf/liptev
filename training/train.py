@@ -26,7 +26,9 @@ def alignment_kl_loss(sim_matrix, alignment_targets, frame_valid, temperature=1.
 def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
                     lambda_ctc=1.0, lambda_align=1.0, alignment_temperature=1.0):
     model.train()
-    bce_loss_fn = nn.BCELoss()
+    # BCE on the raw logit: BCELoss on the post-sigmoid probability gets
+    # dead gradients once the sigmoid saturates to exactly 0.0/1.0.
+    bce_loss_fn = nn.BCEWithLogitsLoss()
 
     total_loss = 0.0
 
@@ -74,8 +76,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
             audio_padding_mask=audio_padding_mask
         )
 
-        # Binary Cross Entropy (maximize verification score)
-        loss_bce = bce_loss_fn(consistency_score.view(-1), labels)
+        # Binary Cross Entropy (maximize verification score) on raw logits
+        loss_bce = bce_loss_fn(align_out['consistency_logit'].view(-1), labels)
 
         # Contrastive Logic via Margin objective
         align_score = align_out['alignment_score']

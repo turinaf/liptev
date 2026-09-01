@@ -7,14 +7,27 @@ from utils.alignment import expand_token_ranges, build_alignment_targets
 
 class Config:
     def __init__(self, config_path="config.json"):
-        full_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), config_path)
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        full_path = os.path.join(repo_root, config_path)
         if os.path.exists(full_path):
             with open(full_path, 'r') as f:
                 cfg = json.load(f)
         else:
             cfg = {}
+
+        def _resolve_path(value, default):
+            if value is None:
+                value = default
+            if not isinstance(value, str):
+                return os.path.abspath(os.path.join(repo_root, str(default)))
+            if os.path.isabs(value):
+                return value
+            return os.path.abspath(os.path.join(repo_root, value))
+
         self.dataset = cfg.get("dataset", "grid")
-        self.processed_data_dir = cfg.get("digit_processed_data_dir") if self.dataset == "digit" else cfg.get("grid_processed_data_dir")
+        self.grid_processed_data_dir = _resolve_path(cfg.get("grid_processed_data_dir"), "./data/grid")
+        self.digit_processed_data_dir = _resolve_path(cfg.get("digit_processed_data_dir"), "./data/digit")
+        self.processed_data_dir = self.digit_processed_data_dir if self.dataset == "digit" else self.grid_processed_data_dir
         self.use_audio = cfg.get("use_audio", False)
         self.batch_size = cfg.get("batch_size", 32)
         self.learning_rate = cfg.get("learning_rate", 0.0001)
@@ -40,8 +53,8 @@ class Config:
         self.digit_source_fps = cfg.get("digit_source_fps", 29.87)
 
 def collate_fn_factory(dataset_name, transcript_pool=None):
-    # Digits go through the pinyin converter (compact digit-only ARPABET
-    # vocab); GRID through g2p_en (full 39-phone vocab).
+    # Digits go through the pinyin converter; GRID through g2p_en (CMU
+    # dict) — both index the same shared ARPABET vocabulary (41).
     digit_converter = DigitPinyinConverter() if dataset_name == "digit" else None
     converter = PhonemeConverter() if dataset_name != "digit" else None
     global_sampler = NegativeSampler(transcript_pool or [], dataset_name=dataset_name)
@@ -65,8 +78,8 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
                 per_token = digit_converter.transcript_to_phoneme_indices_per_token(trans)
                 pos_indices = digit_converter.flatten_per_token(per_token)
                 # digit_times: [(token, start_frame, end_frame)] over the full
-                # token sequence — the zip is 1:1 (empty "!" groups keep it
-                # aligned and yield no alignment frames).
+                # token sequence — the zip is 1:1, and every token (the yāo
+                # "!" included) yields alignment frames in its range.
                 token_times = [
                     (ids, fs, fe)
                     for (_, ids), (_, fs, fe) in zip(per_token, item.get('digit_times') or [])

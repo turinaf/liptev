@@ -20,6 +20,35 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset.digit_loader import DigitDataset
 
 
+def test_phoneme_converter_import_does_not_trigger_download(monkeypatch):
+    import importlib
+    import sys
+    import nltk
+
+    for module_name in ("utils.phoneme_converter", "utils.word_phoneme"):
+        sys.modules.pop(module_name, None)
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("unexpected nltk download")
+
+    monkeypatch.setattr(nltk, "download", _fail)
+    mod = importlib.import_module("utils.phoneme_converter")
+    assert hasattr(mod, "ARPABET")
+    assert mod.PHONEME_VOCAB_SIZE > 0
+
+
+def test_config_resolves_relative_paths_from_repo_root(monkeypatch):
+    from utils.dataset_utils import Config
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    monkeypatch.chdir(tempfile.mkdtemp())
+
+    cfg = Config()
+    assert os.path.isabs(cfg.digit_processed_data_dir)
+    assert cfg.digit_processed_data_dir == os.path.join(repo_root, "data", "digit")
+    assert cfg.grid_processed_data_dir == os.path.join(repo_root, "data", "grid")
+
+
 def _make_dataset(txt, lab_line1, lab_times, n_frames=30):
     """Temp dataset with one synthetic 30-frame clip; source_fps=10."""
     root = tempfile.mkdtemp()

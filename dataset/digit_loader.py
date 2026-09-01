@@ -296,7 +296,9 @@ if __name__ == "__main__":
     from utils.negative_sampler import NegativeSampler
     
     config = Config()
-    test_data_dir = config.processed_data_dir
+    # The generic config defaults to the GRID dataset; when this script is used
+    # explicitly for digits we must point at the digit manifests instead.
+    test_data_dir = config.digit_processed_data_dir
     
     print(f"--- Debugging DigitDataset ---")
     print(f"Looking for data in: {test_data_dir}")
@@ -306,12 +308,19 @@ if __name__ == "__main__":
         dataset = DigitDataset(data_dir=test_data_dir, split='train', max_frames=config.max_frames, use_audio=config.use_audio)
         print(f"\nSuccessfully loaded train split with {len(dataset)} samples.")
 
-        from utils.phoneme_converter import DigitPinyinConverter
+        from utils.phoneme_converter import ARPABET, DigitPinyinConverter
         converter = DigitPinyinConverter()
+        id_to_phoneme = {idx: phoneme for idx, phoneme in enumerate(ARPABET)}
 
         def transcript_to_sequence(transcript):
             return converter.flatten_per_token(
                 converter.transcript_to_phoneme_indices_per_token(transcript))
+
+        def transcript_to_phoneme_names(transcript):
+            seq = []
+            for _, ids in converter.transcript_to_phoneme_indices_per_token(transcript):
+                seq.extend(id_to_phoneme[i] for i in ids)
+            return seq
         
         if len(dataset) > 0:
             print("\n--- Inspecting Samples ---")
@@ -322,12 +331,15 @@ if __name__ == "__main__":
             for idx in range(sample_count):
                 sample = dataset[idx]
                 positive_seq = transcript_to_sequence(sample["transcript"])
+                positive_phonemes = transcript_to_phoneme_names(sample["transcript"])
                 negative_transcript = sampler.sample(sample["transcript"])
                 negative_seq = transcript_to_sequence(negative_transcript)
+                negative_phonemes = transcript_to_phoneme_names(negative_transcript)
 
                 print(f"\nSample {idx + 1} Positive:")
                 print(f"Transcript: '{sample['transcript']}'")
-                print(f"Sequence: {positive_seq}")
+                print(f"Sequence IDs: {positive_seq}")
+                print(f"Sequence Phonemes: {positive_phonemes}")
                 print(f"Video Tensor Shape: {sample['video'].shape}")
                 print(f"Video Tensor Data Type: {sample['video'].dtype}")
                 print(f"Max Val: {sample['video'].max():.4f}, Min Val: {sample['video'].min():.4f}")
@@ -336,7 +348,8 @@ if __name__ == "__main__":
 
                 print(f"Sample {idx + 1} Negative:")
                 print(f"Transcript: '{negative_transcript}'")
-                print(f"Sequence: {negative_seq}")
+                print(f"Sequence IDs: {negative_seq}")
+                print(f"Sequence Phonemes: {negative_phonemes}")
             
     except Exception as e:
         print(f"\nError initializing dataset: {e}")

@@ -10,7 +10,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from dataset.preprocessing import extract_lip_frames
 from models.verification_model import LipTextVerificationModel
-from utils.phoneme_converter import PhonemeConverter, DigitPinyinConverter, GRID_VOCAB_SIZE, DIGIT_VOCAB_SIZE
+from utils.phoneme_converter import PhonemeConverter, DigitPinyinConverter, PHONEME_VOCAB_SIZE
 from utils.dataset_utils import Config
 from utils.checkpoint import resolve_alignment_mode
 from evaluation.metrics import load_eer_thresholds
@@ -126,9 +126,9 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     # calibration were produced under the checkpoint's scoring mode.
     alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
 
-    # Needs to match architecture in main: compact digit-only vocab (17) for
-    # digit, full ARPABET (41) for GRID.
-    vocab_size = DIGIT_VOCAB_SIZE if dataset == "digit" else GRID_VOCAB_SIZE
+    # Needs to match architecture in main: the shared ARPABET phoneme vocab
+    # (41) for both GRID and digit.
+    vocab_size = PHONEME_VOCAB_SIZE
     model = LipTextVerificationModel(
         vocab_size=vocab_size,
         feature_dim=256,

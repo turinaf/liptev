@@ -1,11 +1,14 @@
+import os
 import re
-import nltk
-# nltk.download('averaged_perceptron_tagger_eng', quiet=True)
 
-# Full ARPABET vocabulary for English (GRID) transcripts: 39 phonemes +
-# <pad> + <unk>. Digit transcripts use their own compact DIGIT_ARPABET
-# (only the phones digits actually pronounce), so each dataset's text
-# encoder embeddings and CTC head are sized to what it transcribes.
+# This environment is behind a proxy that requires explicit opt-in for NLTK's
+# proxied URL fetching. The project assumes the proxy is trusted and safe.
+os.environ.setdefault("NLTK_ALLOW_PROXIED_URLOPEN", "1")
+
+# Shared ARPABET vocabulary: 39 phonemes + <pad> + <unk>. GRID fills it from
+# the CMU dict via g2p_en; digit transcripts index into the same list through
+# their pinyin pronunciations — one phoneme space, one vocab_size (41) for
+# both datasets.
 ARPABET = [
     "<pad>", "<unk>",
     "AA","AE","AH","AO","AW","AY",
@@ -14,7 +17,7 @@ ARPABET = [
     "M","N","NG","OW","OY","P","R","S",
     "SH","T","TH","UH","UW","V","W","Y","Z","ZH"
 ]
-GRID_VOCAB_SIZE = len(ARPABET)  # 41
+PHONEME_VOCAB_SIZE = len(ARPABET)  # 41
 
 class PhonemeConverter:
     def __init__(self):
@@ -82,12 +85,16 @@ class PhonemeConverter:
 # Mandarin digits: toneless pinyin syllable -> ARPABET phone approximation.
 # Initials map to their closest English phones (q->CH, j->JH, y->Y, w->W);
 # finals decompose articulatorily (an->AA N, ing->IH NG, iu->IY OW,
-# i->IY, u->UW, a->AA, er->ER). This replaces the old opaque 10-class digit
-# vocabulary with pronunciation-level targets, mirroring what g2p_en does
-# for English GRID transcripts.
+# i->IY, u->UW, a->AA, ao->AW, er->ER). This replaces the old opaque 10-class
+# digit vocabulary with pronunciation-level targets, mirroring what g2p_en
+# does for English GRID transcripts.
+#
+# "!" is the digit 1 read yāo — the number-string reading that keeps it
+# distinct from qī (7) — so it is a real pronunciation, not a pause marker.
 DIGIT_PINYIN_PHONEMES = {
     "0": ("líng", ["L", "IH", "NG"]),
     "1": ("yī",   ["Y", "IY"]),
+    "!": ("yāo",  ["Y", "AW"]),
     "2": ("èr",   ["ER"]),
     "3": ("sān",  ["S", "AA", "N"]),
     "4": ("sì",   ["S", "IY"]),
@@ -98,33 +105,23 @@ DIGIT_PINYIN_PHONEMES = {
     "9": ("jiǔ",  ["JH", "IY", "OW"]),
 }
 
-# Compact digit-only vocab: <pad>/<unk> + exactly the phones the digit
-# pronunciations above use (15 phones -> 17 tokens). Derived from the table
-# (sorted for determinism) so it can never drift when a pronunciation
-# changes; every mapped phone is in the vocab by construction.
-DIGIT_ARPABET = [
-    "<pad>", "<unk>",
-    *sorted({p for _, phones in DIGIT_PINYIN_PHONEMES.values() for p in phones}),
-]
-DIGIT_VOCAB_SIZE = len(DIGIT_ARPABET)  # 17
-
 class DigitPinyinConverter:
     """Digit transcripts -> ARPABET ids via toneless pinyin pronunciation.
 
     The digit dataset's counterpart of PhonemeConverter: "7" is pronounced
     qī and articulated as CH IY rather than treated as an opaque word class,
     so the text encoder and the CTC head see sub-lexical units the lips
-    actually produce. Indexes into the compact digit-only vocabulary
-    DIGIT_ARPABET (vocab_size 17: <pad>/<unk> + the 15 phones digits use).
+    actually produce. Indexes into the shared ARPABET vocabulary (41 tokens,
+    the same one GRID's CMU-dict/g2p_en path uses).
 
-    "!" (a pause marker: it carries its own .lab range but no articulation)
-    maps to an EMPTY phoneme group — CTC blank absorbs the pause and the
-    alignment loss gets no supervised frames there. Groups stay 1:1 with
-    transcript tokens so they can be zipped against digit_times.
+    "!" is the digit 1 read yāo (distinct from yī): it carries its own .lab
+    range and contributes Y AW phones, so its frames are supervised like any
+    other token's. Groups stay 1:1 with transcript tokens so they can be
+    zipped against digit_times.
     """
 
     def __init__(self):
-        self.vocab = {p: i for i, p in enumerate(DIGIT_ARPABET)}
+        self.vocab = {p: i for i, p in enumerate(ARPABET)}
 
     def token_to_phoneme_indices(self, token):
         """Phoneme ids for one transcript token ('0'-'9' or '!')."""

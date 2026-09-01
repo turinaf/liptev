@@ -8,7 +8,7 @@ from models.verification_model import LipTextVerificationModel
 from evaluation.evaluate import evaluate_model
 from evaluation.metrics import save_eer_thresholds
 from utils.dataset_utils import collate_fn_factory, Config
-from utils.phoneme_converter import GRID_VOCAB_SIZE, DIGIT_VOCAB_SIZE
+from utils.phoneme_converter import PHONEME_VOCAB_SIZE
 from utils.checkpoint import resolve_alignment_mode
 from dataset.digit_loader import DigitDataset
 
@@ -103,9 +103,9 @@ def test():
     alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
 
     print("Initializing model...")
-    # Must match the vocab the checkpoint was trained with: compact digit-only
-    # vocab (17) for digit, full ARPABET (41) for GRID.
-    vocab_size = DIGIT_VOCAB_SIZE if cfg.dataset == "digit" else GRID_VOCAB_SIZE
+    # Must match the vocab the checkpoint was trained with: the shared
+    # ARPABET phoneme vocab (41) for both GRID and digit.
+    vocab_size = PHONEME_VOCAB_SIZE
     model = LipTextVerificationModel(
         vocab_size=vocab_size,
         feature_dim=256,

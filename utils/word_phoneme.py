@@ -1,11 +1,19 @@
-import nltk
+import os
 import string
+
+os.environ.setdefault("NLTK_ALLOW_PROXIED_URLOPEN", "1")
+
+import nltk
 from nltk.corpus import cmudict
 from g2p_en import G2p
 
-nltk.download('cmudict')
-nltk.download('averaged_perceptron_tagger_eng')
-d = cmudict.dict()
+# Avoid eager downloads during import: these resources are only needed for
+# dictionary-backed phoneme lookups and should be fetched lazily when requested.
+try:
+    d = cmudict.dict()
+except LookupError:
+    d = {}
+
 
 def word_to_phoneme(word):
     word = word.lower().strip(string.punctuation)

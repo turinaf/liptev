@@ -158,9 +158,9 @@ def test_model_forward_grid_vocab():
     _smoke_forward(vocab_size=41)
 
 def test_model_forward_digit_vocab():
-    # Digit transcripts map into their own compact vocab: <pad>/<unk> +
-    # the 15 phones the digit pronunciations use (no shared 41 with GRID).
-    _smoke_forward(vocab_size=17)
+    # Digit transcripts share GRID's ARPABET vocabulary: pinyin phones are
+    # a subset of the same 41-token phoneme space (no separate digit vocab).
+    _smoke_forward(vocab_size=41)
 
 def test_positives_only_mask():
     # The training loop's CTC mask: negatives must be excluded even when valid.
@@ -269,16 +269,17 @@ def test_model_forward_with_each_mode():
 
 # --- audio path ---------------------------------------------------------------
 
-def test_bang_token_keeps_sequence_slot():
-    # Zero-length ranges (start == end) get zero supervised frames but keep
-    # the sequence slot so later tokens don't shift.
-    token_times = [([2], 0, 5), ([11], 0, 0), ([4], 10, 20)]  # digit, "!", digit
+def test_zero_length_range_keeps_sequence_slot():
+    # Zero-length ranges (start == end, e.g. a .lab clamp to the video edge)
+    # get zero supervised frames but keep the sequence slot so later tokens
+    # don't shift.
+    token_times = [([2], 0, 5), ([11], 0, 0), ([4], 10, 20)]
     ranges = expand_token_ranges(token_times)
     # ranges: [(0,0,5), (1,0,0), (2,10,20)]
     targets, speech = build_alignment_targets(ranges, video_len=25, target_len=3)
     assert targets[:5, 0].all()
-    assert targets[:, 1].sum() == 0            # "!" gets no frames
-    assert targets[10:20, 2].all()             # later digit at position 2
+    assert targets[:, 1].sum() == 0            # zero-length range gets no frames
+    assert targets[10:20, 2].all()             # later token at position 2
 
 def test_audio_forward_with_masks():
     from models.verification_model import LipTextVerificationModel

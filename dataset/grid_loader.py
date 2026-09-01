@@ -221,10 +221,12 @@ if __name__ == "__main__":
         for idx in range(sample_count):
             sample = dataset[idx]
             pos_transcript = sample["transcript"]
-            pos_phonemes, pos_indices = converter.text_to_phonemes(pos_transcript)
+            raw_pos_phonemes, pos_indices = converter.text_to_phonemes(pos_transcript)
+            pos_phonemes = [converter.remove_stress(p) for p in raw_pos_phonemes]
 
             neg_transcript = sampler.sample(pos_transcript)
-            neg_phonemes, neg_indices = converter.text_to_phonemes(neg_transcript)
+            raw_neg_phonemes, neg_indices = converter.text_to_phonemes(neg_transcript)
+            neg_phonemes = [converter.remove_stress(p) for p in raw_neg_phonemes]
 
             print(f"\nSample {idx + 1} Positive:")
             print(f"Transcript: '{pos_transcript}'")

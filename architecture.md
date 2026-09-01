@@ -139,7 +139,7 @@ After processing all speakers, all processed videos are globbed, shuffled with `
 | | `GRIDDataset` | `DigitDataset` |
 |---|---|---|
 | Frame budget | `max_frames = 75` (3 s @ 25 fps) | `max_frames = 125` (p95 clip length) |
-| Transcript tokens | ARPABET phonemes (vocab 41 = 39 phonemes + `<pad>` + `<unk>`) via `g2p_en` | Toneless pinyin of each digit → ARPABET phones (compact digit-only vocab 17 = 15 phones + `<pad>` + `<unk>`) via `DigitPinyinConverter`; `!` → empty group |
+| Transcript tokens | ARPABET phonemes (vocab 41 = 39 phonemes + `<pad>` + `<unk>`) via `g2p_en` | Toneless pinyin of each digit → ARPABET phones in the **same shared vocab 41** via `DigitPinyinConverter`; `!` = the digit 1 read *yāo* → `Y AW` |
 | Boundary source | `.align` word times | `.lab` digit times |
 | Timebase fix | Proportional calibration: `frame = value · video_len / max_end` (raw values are ~25 kHz sample units) | `seconds_to_frame(s, source_fps)` using `meta.json`, fallback inference `frames/duration`, then config default |
 

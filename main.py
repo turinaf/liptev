@@ -14,7 +14,7 @@ from evaluation.evaluate import evaluate_model
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from utils.dataset_utils import Config, collate_fn_factory
-from utils.phoneme_converter import GRID_VOCAB_SIZE, DIGIT_VOCAB_SIZE
+from utils.phoneme_converter import PHONEME_VOCAB_SIZE
 from utils.checkpoint import save_checkpoint, check_alignment_supervision
 
 
@@ -63,9 +63,10 @@ def main():
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
         val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
         
-        # Digit transcripts use the compact digit-only vocab (17); GRID the
-        # full ARPABET vocab (41). Must match the converter in collate_fn.
-        vocab_size = DIGIT_VOCAB_SIZE if config.dataset == "digit" else GRID_VOCAB_SIZE
+        # Shared ARPABET phoneme vocab (41) for both datasets — GRID via the
+        # CMU dict (g2p_en), digit via pinyin. Must match the converter in
+        # collate_fn.
+        vocab_size = PHONEME_VOCAB_SIZE
         model = LipTextVerificationModel(
             vocab_size=vocab_size,
             lip_backbone_pretrained=config.lip_backbone_pretrained,

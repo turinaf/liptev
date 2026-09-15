@@ -40,6 +40,34 @@ class PhonemeConverter:
 
         return phonemes, indices
 
+    def _phoneme_index(self, token):
+        """Index of a g2p output token, or None if it is not an ARPABET phoneme.
+
+        g2p passes spaces and punctuation through unchanged, so whole-sentence
+        output contains non-phoneme tokens (the legacy text_to_phonemes path
+        mapped every inter-word space to <unk>).
+        """
+        return self.vocab.get(self.remove_stress(token))
+
+    def word_to_phoneme_indices(self, word):
+        """Deterministic per-word phoneme ids (CMU-dict lookup for known words).
+
+        Single source of truth for both the text-encoder input and the
+        alignment-target token axis — the two must index identical phonemes.
+        """
+        phonemes = self.g2p(self.normalize_text(word))
+        return [idx for p in phonemes if (idx := self._phoneme_index(p)) is not None]
+
+    def text_to_phoneme_indices_per_word(self, text):
+        """Per-word [(word, [phoneme_ids])] for a transcript."""
+        words = self.normalize_text(text).split()
+        return [(w, self.word_to_phoneme_indices(w)) for w in words]
+
+    @staticmethod
+    def flatten_per_word(per_word):
+        """Concatenate per-word ids into the full target/encoder sequence."""
+        return [idx for _, ids in per_word for idx in ids]
+
     @property
     def vocab_size(self):
         return len(self.vocab)

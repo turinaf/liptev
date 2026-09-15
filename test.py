@@ -6,7 +6,9 @@ from torch.utils.data import DataLoader
 from dataset.grid_loader import GRIDDataset
 from models.verification_model import LipTextVerificationModel
 from evaluation.evaluate import evaluate_model
+from evaluation.metrics import save_eer_thresholds
 from utils.dataset_utils import collate_fn_factory, Config
+from utils.checkpoint import resolve_alignment_mode
 from dataset.digit_loader import DigitDataset
 
 
@@ -76,6 +78,29 @@ def test():
         collate_fn=collate_fn_factory(cfg.dataset)
     )
     
+    model_save_path = _resolve_latest_checkpoint(output_dir_abs)
+    if model_save_path is None:
+        print(f"No checkpoints found under {output_dir_abs}. Please train the model first.")
+        return
+
+    print(f"Loading weights from {model_save_path}...")
+    checkpoint = torch.load(model_save_path, map_location=device)
+
+    # Handle both standalone weights and wrapped checkpoint dictionaries
+    state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
+
+    # Handle DDP weights (stripping the 'module.' prefix if the model was trained with Multi-GPU)
+    clean_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            clean_state_dict[k[7:]] = v
+        else:
+            clean_state_dict[k] = v
+
+    # The checkpoint's stamp wins over config: the classifier and the EER
+    # calibration were produced under the checkpoint's scoring mode.
+    alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
+
     print("Initializing model...")
     if cfg.dataset == "digit":
         vocab_size = 13  # 0-9, !, <pad>, <unk>
@@ -84,35 +109,32 @@ def test():
     model = LipTextVerificationModel(
         vocab_size=vocab_size,
         feature_dim=256,
-        lip_backbone_pretrained=cfg.lip_backbone_pretrained
+        lip_backbone_pretrained=cfg.lip_backbone_pretrained,
+        alignment_mode=alignment_mode
     ).to(device)
-    
-    model_save_path = _resolve_latest_checkpoint(output_dir_abs)
-    if model_save_path is None:
-        print(f"No checkpoints found under {output_dir_abs}. Please train the model first.")
-        return
-    
-    print(f"Loading weights from {model_save_path}...")
-    checkpoint = torch.load(model_save_path, map_location=device)
-    
-    # Handle both standalone weights and wrapped checkpoint dictionaries
-    state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
-    
-    # Handle DDP weights (stripping the 'module.' prefix if the model was trained with Multi-GPU)
-    clean_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith("module."):
-            clean_state_dict[k[7:]] = v
-        else:
-            clean_state_dict[k] = v
-            
+
     model.load_state_dict(clean_state_dict)
     
     print("\n[--- Testing Phase ---]")
     print("Evaluating Model on Hold-out Test Set...")
     test_metrics = evaluate_model(model, test_loader, device)
-    
-    print(f"\nFinal Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f}")
+
+    # Persist the EER calibration so single-pair inference (which
+    # auto-discovers this file next to the checkpoint) can make
+    # MATCH/MISMATCH decisions at the EER-optimal thresholds.
+    thresholds_path = os.path.join(output_dir_abs, "eer_thresholds.json")
+    save_eer_thresholds(
+        test_metrics,
+        {
+            "checkpoint": os.path.basename(model_save_path),
+            "dataset": cfg.dataset,
+            "n_samples": len(test_dataset),
+        },
+        thresholds_path,
+    )
+    print(f"EER thresholds saved to {thresholds_path}")
+
+    print(f"\nFinal Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f} | EER: {test_metrics['verification_eer']:.4f}")
 
 if __name__ == "__main__":
     test()

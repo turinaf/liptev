@@ -14,6 +14,7 @@ from evaluation.evaluate import evaluate_model
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from utils.dataset_utils import Config, collate_fn_factory
+from utils.checkpoint import save_checkpoint, check_alignment_supervision
 
 
 
@@ -44,10 +45,11 @@ def main():
             device = torch.device("cuda:0")
 
         config = Config()
-        
+        check_alignment_supervision(config.alignment_mode, config.lambda_align)
+
         if config.dataset == "digit":
-            train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
-            val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
+            train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps)
+            val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps)
         else:
             train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
             val_dataset = GRIDDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
@@ -66,7 +68,8 @@ def main():
             vocab_size = 41  # PhonemeConverter.vocab_size (39+pad+unk)
         model = LipTextVerificationModel(
             vocab_size=vocab_size,
-            lip_backbone_pretrained=config.lip_backbone_pretrained
+            lip_backbone_pretrained=config.lip_backbone_pretrained,
+            alignment_mode=config.alignment_mode
         ).to(device)
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
         
@@ -78,7 +81,9 @@ def main():
             
         for epoch in range(1, config.epochs + 1):
             train_sampler.set_epoch(epoch)
-            train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None)
+            train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None,
+                                         lambda_ctc=config.lambda_ctc, lambda_align=config.lambda_align,
+                                         alignment_temperature=config.alignment_temperature)
             
             metrics = evaluate_model(model, val_loader, device)
             
@@ -86,13 +91,23 @@ def main():
                 print(
                     f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | "
                     f"Val ROC AUC: {metrics['roc_auc']:.4f} | "
+                    f"Val EER: {metrics['verification_eer']:.4f} | "
                     f"Val Ver Acc: {metrics['verification_accuracy']:.4f}"
                 )
                 writer.add_scalar('Logic/roc_auc', metrics["roc_auc"], epoch)
+                writer.add_scalar('Logic/align_roc_auc', metrics["alignment_roc_auc"], epoch)
+                writer.add_scalar('EER/verify', metrics["verification_eer"], epoch)
+                writer.add_scalar('EER/align', metrics["alignment_eer"], epoch)
                 writer.add_scalar('Accuracy/verify', metrics["verification_accuracy"], epoch)
+                writer.add_scalar('Accuracy/verify_at_eer', metrics["verification_accuracy_at_eer"], epoch)
                 
-                # Save checkpoint
-                torch.save(model.module.state_dict(), os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"))
+                # Save checkpoint (mode stamped next to the weights so eval
+                # runs can't silently score it under a different mode)
+                save_checkpoint(
+                    model.module.state_dict(),
+                    os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"),
+                    config.alignment_mode,
+                )
     finally:
         if writer is not None:
             writer.close()

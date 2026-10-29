@@ -26,7 +26,7 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def main():
+def main(config_path="config.json"):
     writer = None
     try:
         # Detect if spawned via torchrun
@@ -44,7 +44,7 @@ def main():
             world_size = 1
             device = torch.device("cuda:0")
 
-        config = Config()
+        config = Config(config_path)
         check_alignment_supervision(config.alignment_mode, config.lambda_align)
 
         if config.dataset == "digit":
@@ -119,8 +119,14 @@ def main():
             cleanup()
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Lip-Text Verification Training")
+    parser.add_argument("--config", type=str, default="config.json",
+                        help="Config file selecting dataset, data dirs, and checkpoint output dir")
+    args = parser.parse_args()
+
     if "LOCAL_RANK" in os.environ:
-        main()
+        main(args.config)
     else:
         world_size = torch.cuda.device_count()
         if world_size > 0:
@@ -131,7 +137,7 @@ if __name__ == "__main__":
             def entry(rank, ws):
                 os.environ["LOCAL_RANK"] = str(rank)
                 os.environ["WORLD_SIZE"] = str(ws)
-                main()
+                main(args.config)
             mp.spawn(entry, args=(world_size,), nprocs=world_size, join=True)
         else:
             print("No CUDA devices available.")

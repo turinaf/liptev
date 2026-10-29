@@ -218,4 +218,9 @@ def prepare_dataset(config_path="config.json"):
     print(f" - Test:  {len(test_videos)}")
 
 if __name__ == "__main__":
-    prepare_dataset()
+    import argparse
+    parser = argparse.ArgumentParser(description="Lip-Text Verification data preparation")
+    parser.add_argument("--config", type=str, default="config.json",
+                        help="Config file selecting dataset + data dirs (relative to the repo root; run from repo root)")
+    args = parser.parse_args()
+    prepare_dataset(args.config)

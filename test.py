@@ -58,8 +58,8 @@ def build_eval_model(checkpoint, cfg, vocab_size, device):
         use_vfa=resolve_vfa_heads(checkpoint)
     ).to(device)
 
-def test():
-    cfg = Config("config.json")
+def test(config_path="config.json"):
+    cfg = Config(config_path)
     proj_root = os.path.dirname(os.path.abspath(__file__))
     output_dir_abs = cfg.output_dir if os.path.isabs(cfg.output_dir) else os.path.abspath(os.path.join(proj_root, cfg.output_dir))
     
@@ -142,4 +142,9 @@ def test():
     print(f"\nFinal Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f} | EER: {test_metrics['verification_eer']:.4f}")
 
 if __name__ == "__main__":
-    test()
+    import argparse
+    parser = argparse.ArgumentParser(description="Lip-Text Verification test-set evaluation + EER calibration")
+    parser.add_argument("--config", type=str, default="config.json",
+                        help="Config file selecting dataset, data dir, and checkpoint output dir")
+    args = parser.parse_args()
+    test(args.config)

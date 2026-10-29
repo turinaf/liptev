@@ -3,7 +3,7 @@
     "digit_raw_data_dir": "../digit_data",
     "digit_processed_data_dir": "./data/digit",
     "grid_raw_data_dir": "../data",
-    "grid_processed_data_dir": "./data/grid",
+    "grid_processed_data_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/grid-data",
     "use_audio": false,
     "audio_sample_rate": 16000,
     "max_frames": 75,
@@ -22,5 +22,5 @@
     "lambda_boundary": 1.0,
     "lambda_word_verif": 1.0,
     "vfa_boundary_threshold": 0.8,
-    "output_dir": "./exp/grid/no_audio"
+    "output_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/liptev-exp/grid"
 }

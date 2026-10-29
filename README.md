@@ -151,3 +151,28 @@ Transcript: lay green by g zero please
 Alignment Score: 0.1235
 ------------------------------
 ```
+
+**Per-token JSON report (`--json`).** Add `--json <path>` to the inference call to write a machine-readable report alongside the console output:
+
+```bash
+python inference.py --video data/processed/subset_1/s1/video/123.mp4 \
+                    --text "1 2 3" --dataset digit --json report.json
+```
+
+The JSON contains the global scores plus one row per transcript token. Each row carries the Viterbi-decoded time span in seconds, an `alignment_score` (**non-semantic**: the mean of the frame posterior and the cross-modal word score over the span — how well the mouth traces that token's timeline), and a `verification_score` (**semantic**: the word-head sigmoid, thresholded at the EER-calibrated threshold into `MATCH`/`MISMATCH`). `low_confidence` is set when the video was too short for Viterbi and uniform spans were used as a fallback:
+
+```json
+{
+  "global": {
+    "verification_score": 0.9384,
+    "alignment_score": 0.9127
+  },
+  "tokens": [
+    {"token": "1", "start_s": 0.32,  "end_s": 0.68,  "alignment_score": 0.9102, "verification_score": 0.9741, "verdict": "MATCH",    "low_confidence": false},
+    {"token": "2", "start_s": 0.68,  "end_s": 1.05,  "alignment_score": 0.9233, "verification_score": 0.9618, "verdict": "MATCH",    "low_confidence": false},
+    {"token": "3", "start_s": 1.05,  "end_s": 1.44,  "alignment_score": 0.8955, "verification_score": 0.2214, "verdict": "MISMATCH", "low_confidence": false}
+  ]
+}
+```
+
+GRID rows are per-phoneme; digit rows per-digit. Checkpoints trained without the VFA heads (`vfa_heads` stamp missing) disable the per-token output with a printed note and report `"tokens": null`.

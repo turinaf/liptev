@@ -44,18 +44,21 @@ flowchart TD
         AE["Audio Encoder"]
         CMA["Cross-Modal Alignment x3"]
         CTC["CTC Head"]
+        VFA["VFA Heads<br/>frame + boundary + word verification"]
         CLF["Verification Classifier"]
     end
 
     BATCH --> LE & TE & AE
     LE & TE & AE --> CMA
     LE --> CTC
+    LE & TE --> VFA
     CMA & CTC --> CLF
 
     subgraph TRAIN["Training (training/train.py)"]
-        L["Loss = BCE + Contrastive<br/>+ λ_ctc·CTC + λ_align·AlignCE"]
+        L["Loss = BCE + Contrastive + λ_ctc·CTC + λ_align·AlignCE<br/>+ λ_frame·FrameCE + λ_bound·Boundary + λ_word·WordVerif"]
     end
     CLF --> L
+    VFA --> L
 ```
 
 ---
@@ -170,6 +173,7 @@ flowchart TB
     PV & NV --> VMASK["video_padding_mask<br/>position >= video_len"]
     AU["Audio stack + zero-pad<br/>audio_padding_mask"] 
     PT --> AT["expand_token_ranges:<br/>word frame range split uniformly<br/>across its phonemes<br/>→ one-hot targets B×T×L<br/>+ speech_mask + has_align_target"]
+    PT --> WT["word_spans B×T×L one-hot +<br/>word_labels B×L + word_label_mask:<br/>positives all-1; substitution negatives<br/>keep 1s except the swapped token = 0"]
 ```
 
 **Text → phonemes** (`utils/phoneme_converter.py`): lowercases/strips punctuation, runs `g2p_en` (CMU dict + neural fallback), removes stress digits, maps to a fixed 39-phoneme ARPABET vocabulary. Crucially, `text_to_phoneme_indices_per_word` keeps **per-word phoneme groups** so word-level boundary times can be distributed across each word's phonemes — the same indices feed both the text encoder and the alignment target axis.
@@ -184,6 +188,8 @@ flowchart TB
 | `phoneme_similar` | Swap one word with a phonetically confusable word from the same GRID grammar class (color↔color, letter↔letter, digit-word↔digit-word); for digits, swap one digit |
 
 A global guard guarantees the negative ≠ positive (e.g., shuffling `"7 7 7 7"` would otherwise produce a mislabeled pair). Negatives get empty `token_times` — a mismatched transcript has no valid alignment supervision.
+
+**Per-token verification supervision** — alongside `alignment_targets`, the collate emits three tensors for the VFA word-verification head (§4.7): `word_spans` (`B×T×L` one-hot, mirroring `alignment_targets` but also built for *single-substitution* negatives, whose frames still articulate every token except the swap), `word_labels` (`B×L`, 1 on true tokens, 0 on the swapped token) and `word_label_mask` (which positions carry supervision). For digits the swap replaces the frame range's token id at the substituted position; for GRID the swapped word keeps its frame range and only its phoneme ids/labels are replaced (skipped when the word's phoneme count differs). Non-substitution negatives carry no per-token supervision.
 
 ---
 
@@ -307,11 +313,37 @@ Concatenates `[pooled lip (256) | pooled text (256) | pooled audio (256) | 3 ali
 
 When audio is disabled (`use_audio=false`), the audio pool and the two audio-related scores are zeros and the model degrades gracefully to lip-vs-text only.
 
+### 4.7 VFA Heads — forced alignment + per-token verification
+
+When `use_vfa=true` (the default; `false` omits the heads entirely so legacy checkpoints strict-load), three extra heads read the shared encoder features (models/vfa_heads.py):
+
+```mermaid
+flowchart TB
+    LF2["lip_feats B×T×256"] --> FH["frame_head: 256→128 → ReLU → 128→V<br/>per-frame token logits<br/>(class 0 = silence, 1..V−1 = tokens)"]
+    LF2 --> BH["boundary_head: 256→128 → ReLU → 128→1<br/>per-frame token-transition logit"]
+    WS["word_spans one-hot B×T×L"] --> POOLT["pool_tokens:<br/>masked-mean pool lip features<br/>over each token's span frames"]
+    LF2 --> POOLT
+    POOLT --> WVH["WordVerificationHead:<br/>cat[lip 256 | text 256] → 128 → ReLU → 1<br/>per-token logit"]
+    TF2["text_feats B×L×256"] --> WVH
+    FH & BH --> VIT["Viterbi (utils/viterbi.py) at inference:<br/>monotonic frame→token decode;<br/>boundary prob > vfa_boundary_threshold (0.8)<br/>forces the token-to-token handover"]
+    VIT --> SP["token_spans → per-occurrence<br/>(pos, start, end) spans<br/>('7 7 7 7' splits correctly)"]
+    SP --> SWS["score_word_spans:<br/>word-head sigmoid per token"]
+    POOLT -.-> SWS
+```
+
+- **Frame head** — per-frame logits over `[silence + vocab]` (class 0 is silence; the `<pad>` id never appears in transcripts). Supervised with cross-entropy (`ignore_index` on padded frames) against frame token ids derived from the `.align`/`.lab` boundary times.
+- **Boundary head** — one transition logit per frame, trained with `BCEWithLogits` against token-to-token handovers in the ground-truth alignment.
+- **Word verification head** — for each token position, span-pool the lip features and concatenate the text-encoder embedding → a per-token logit: the per-token analogue of the global classifier, so *"which digit was wrong"* becomes answerable, not just *"the clip is wrong"*.
+
+**Batch plumbing** — when the collate provides `word_spans`, `forward(..., word_spans=...)` additionally emits `vfa_frame_logits`, `vfa_bound_logits`, `word_verif_logits` and a `word_token_mask`; `lip_feats`/`text_feats` are always returned so inference can run the Viterbi/word-head path without recomputing the encoders. Checkpoints stamp `vfa_heads=true`.
+
+**Viterbi at inference** (utils/viterbi.py, ported from Visual-Forced-Alignment): a monotonic frame→token decode over the frame posteriors with two refinements — forced boundary transitions are pinned to token-to-token handovers (matching the boundary head's training targets), and boundary probabilities above `vfa_boundary_threshold` force the transition; a boundary peak the path fails to honour triggers a retry without boundary hints. `token_spans(frame_to_label, labels)` takes the full label sequence `[0] + token_ids + [0]` and assigns **per-occurrence** positions, so repeated tokens (`"7 7 7 7"`) split correctly; videos shorter than the token count fall back to `uniform_token_spans(T, n)`. The public `score_word_spans(lip_feats, text_feats, word_spans)` then runs the word head on the decoded spans.
+
 ---
 
 ## 5. Training Objective (`training/train.py`)
 
-Four losses are summed per batch (each batch contains interleaved positive/negative pairs):
+Four base losses are summed per batch (each batch contains interleaved positive/negative pairs), plus three VFA terms when the heads and their supervision tensors are present:
 
 ```mermaid
 flowchart LR
@@ -319,13 +351,19 @@ flowchart LR
     ASCORE["alignment_score (weighted)"] --> CON["L_contrastive =<br/>label·(1 − score)<br/>+ (1−label)·clamp(score − 0.5, min 0)<br/>margin-style hinge"]
     CTCN["ctc_nll_per_token"] --> CTC["L_ctc = mean NLL<br/>positive pairs only"]
     SIM["sim_matrix (lip↔text)"] --> ALN["L_align = frame→token<br/>cross-entropy vs one-hot<br/>alignment_targets<br/>speech frames, positives<br/>with boundary data only"]
-    BCE & CON & CTC & ALN --> TOT["Total = L_bce + L_contrastive<br/>+ λ_ctc·L_ctc + λ_align·L_align<br/>(λ from config, default 1.0)"]
+    FLOG["vfa_frame_logits"] --> FCE["L_frame_ce = CE vs frame token ids<br/>(ignore_index on padded frames)"]
+    BLOG["vfa_bound_logits"] --> BND["L_boundary = BCEWithLogits<br/>vs token handovers"]
+    WLOG["word_verif_logits"] --> WVER["L_word_verif = per-token BCE:<br/>positives label 1, swapped token<br/>of substitution negatives label 0,<br/>masked by word_label_mask<br/>& word_token_mask"]
+    BCE & CON & CTC & ALN & FCE & BND & WVER --> TOT["Total = L_bce + L_contrastive + λ_ctc·L_ctc<br/>+ λ_align·L_align + λ_frame·L_frame_ce<br/>+ λ_bound·L_boundary + λ_word·L_word_verif<br/>(λ from config, default 1.0)"]
 ```
 
 - **BCE** trains the sigmoid classifier directly against the pair label.
 - **Contrastive margin** shapes the alignment score itself: positives pulled toward 1; negatives pushed below an implicit 0.5 margin (no gradient once below it).
 - **CTC** teaches the lip encoder frame-level articulation structure (which frames produce which phonemes).
 - **Frame-level alignment CE** (`alignment_kl_loss`) supervises the cosine similarity matrix against the one-hot `alignment_targets` built from `.align`/`.lab` boundaries — each speech frame must attend to exactly its current phoneme. Per-sample means are averaged only over samples with targets, so partial boundary coverage doesn't bias the loss.
+- **VFA frame CE** (`vfa_frame_ce_loss`, weight `lambda_frame_ce`) trains the frame head's per-frame token logits (`ignore_index` on padded frames).
+- **VFA boundary BCE** (`vfa_boundary_loss`, weight `lambda_boundary`) trains the boundary head on token-to-token handovers.
+- **VFA word verification BCE** (`word_verification_loss`, weight `lambda_word_verif`) trains the per-token head on positives (all tokens label 1) and single-substitution negatives (swapped token label 0), active only where `word_label_mask & word_token_mask`. All three run only when the checkpoint was built with `vfa_heads=true` and the batch carries the supervision tensors.
 
 **Orchestration** (`main.py`): DDP over all visible GPUs (torchrun or auto-spawn), Adam (lr 1e-4), per-epoch validation computing **ROC AUC, EER, verification accuracy** (`evaluation/`), TensorBoard scalars, and per-epoch checkpoints.
 
@@ -344,10 +382,12 @@ flowchart LR
 | Phoneme converter | `utils/phoneme_converter.py` | text → ARPABET ids | g2p_en, per-word grouping |
 | Negative sampler | `utils/negative_sampler.py` | transcript → corrupted transcript | 5 hard-negative strategies |
 | Alignment targets | `utils/alignment.py` | word times → one-hot B×T×L | Uniform word→phoneme frame splitting |
+| VFA heads | `models/vfa_heads.py` | lip_feats/text_feats + span one-hot → frame/boundary logits, per-token logit | Forced-alignment targets + per-token verification |
+| Viterbi aligner | `utils/viterbi.py` | frame logits + boundary probs → frame→token labels, per-occurrence spans | Monotonic decode, boundary-forced handovers, short-video fallback |
 | Lip encoder | `models/lip_encoder.py` | B×T×3×96×96 → B×T×256 | 3D conv + ResNet18 + transformer |
 | Text encoder | `models/text_encoder.py` | B×L → B×L×256 | Embedding + transformer |
 | Audio encoder | `models/audio_encoder.py` | waveform → B×T_mel×256 | Mel + projection + transformer |
 | Alignment module | `models/cross_modal_alignment.py` | two feature sets → score ∈ [0,1] | Cosine sim + cross attention + max-pooling |
 | Full model | `models/verification_model.py` | triplet + masks → score, aux outputs | Fusion, CTC feature, sigmoid classifier |
-| Trainer | `training/train.py` | batches → updates | 4-term composite loss |
+| Trainer | `training/train.py` | batches → updates | 7-term composite loss (4 base + 3 VFA) |
 | Orchestrator | `main.py` | config → trained checkpoint | DDP, eval loop, TensorBoard |

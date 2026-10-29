@@ -68,8 +68,13 @@ def build_token_report(tokens, spans, seconds_per_frame, posterior_scores,
                          "verdict": "uncalibrated", "low_confidence": True})
             continue
         s, e = span
-        align = 0.5 * (posterior_scores[i] + word_scores[i]) if posterior_scores[i] is not None \
-            else word_scores[i]
+        post, word = posterior_scores[i], word_scores[i]
+        if post is None:
+            align = word
+        elif word is None:
+            align = post
+        else:
+            align = 0.5 * (post + word)
         verif = verification_scores[i]
         verdict = "uncalibrated" if (ver_thr is None or verif is None) else \
             ("MATCH" if verif >= ver_thr else "MISMATCH")
@@ -318,7 +323,13 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
             verif_scores = torch.sigmoid(logits)[0].cpu().tolist()
             # map scores back onto token positions (spans may skip tokens)
             post_by_pos = {pos: v for (pos, _, _), v in zip(spans, posterior_scores)}
-            ws_by_pos = {pos: v for (pos, _, _), v in zip(spans, verif_scores)}
+            # Cross-modal word scores (B x L) from the alignment module — a
+            # different signal than the word-head verification sigmoid below.
+            word_scores_t = align_out.get("word_scores")
+            ws_by_pos = {}
+            if word_scores_t is not None:
+                ws = word_scores_t[0].detach().cpu().tolist()
+                ws_by_pos = {pos: ws[pos] for pos, _, _ in spans}
             ver_by_pos = {pos: v for (pos, _, _), v in zip(spans, verif_scores)}
             n_tokens = len(token_names)
             token_rows = build_token_report(

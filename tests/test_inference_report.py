@@ -59,3 +59,28 @@ def test_build_token_report_missing_token_flagged():
     )
     assert rows[1]["low_confidence"] is True
     assert rows[1]["start_s"] is None
+
+
+def test_build_token_report_alignment_score_signals():
+    # posterior None + word present -> alignment is the word score alone
+    rows = build_token_report(
+        ["1"], [(0, 0, 10)], seconds_per_frame=0.04,
+        posterior_scores=[None], word_scores=[0.7], verification_scores=[0.9],
+        thresholds={"verification": 0.5}, fallback=False,
+    )
+    assert abs(rows[0]["alignment_score"] - 0.7) < 1e-6
+    assert rows[0]["verification_score"] == 0.9
+    # word None + posterior present -> alignment is the posterior alone
+    rows = build_token_report(
+        ["2"], [(0, 0, 10)], seconds_per_frame=0.04,
+        posterior_scores=[0.3], word_scores=[None], verification_scores=[0.1],
+        thresholds={"verification": 0.5}, fallback=False,
+    )
+    assert abs(rows[0]["alignment_score"] - 0.3) < 1e-6
+    # both present -> mean (distinct signals must not be conflated)
+    rows = build_token_report(
+        ["3"], [(0, 0, 10)], seconds_per_frame=0.04,
+        posterior_scores=[0.4], word_scores=[0.8], verification_scores=[0.1],
+        thresholds={"verification": 0.5}, fallback=False,
+    )
+    assert abs(rows[0]["alignment_score"] - 0.6) < 1e-6

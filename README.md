@@ -1,178 +1,83 @@
-# Lip-to-Text Verification Model
+# Lip-to-Text Verification
 
-This repository contains a PyTorch implementation for a Cross-Modal Lip-to-Text Verification system using the GRID dataset. The goal of this model is to take a sequence of lip movement frames and a text transcript, then compute an alignment-based consistency score (0 to 1). 
+Given a silent video of a speaker and a transcript, score how well the lip movements match the text (0–1). This is a verification system, not lip reading: it does not generate text, and the score measures visual-text consistency rather than a hard match/mismatch decision on its own.
 
-**Important:** This system strictly measures the synchronization and alignment quality between lip movements and transcripts. It **does not** classify a definitive "match/mismatch", nor does it perform lip reading or visual speech recognition (generating text from video).
+Two datasets are supported:
 
-## 📂 Project Structure
+- **GRID** (English): word transcripts phonemized with `g2p_en` (39 ARPABET phonemes), boundaries from `.align` files.
+- **Digit** (Chinese): digit sequences (0–9 plus `!` interjections), boundaries from `.lab` files.
 
-```text
-.
-├── dataset/
-│   ├── grid_loader.py          # GRID Dataset PyTorch Datasets
-│   └── preprocessing.py        # Video frame extraction & lip cropping (96x96)
-├── models/
-│   ├── lip_encoder.py          # Spatial-temporal video feature extractor
-│   ├── text_encoder.py         # Phoneme embedding and Transformer encoder
-│   ├── cross_modal_alignment.py# Cross-attention and alignment scoring
-│   └── verification_model.py   # Final consistency linear classifier
-├── training/
-│   └── train.py                # Training loop, contrastive logic, and BCE loss
-├── evaluation/
-│   ├── metrics.py              # Precision, ROC AUC, Accuracy, margin
-│   └── evaluate.py             # Validation loops and inferences
-├── pipeline/
-│   └── data_preparation.py     # End-to-end dataset preprocessing
-├── utils/
-│   ├── phoneme_converter.py    # Maps English transcripts to integer phoneme vocabulary
-│   └── negative_sampler.py     # Generates bad transcripts for contrastive training
-├── main.py                     # Training orchestrator & evaluation suite
-├── inference.py                # External inference execution script 
-└── README.md                   # This file
-```
+## Model
 
----
+A 3D-conv + ResNet18 lip encoder and a phoneme/digit embedding + transformer text encoder feed a cross-modal alignment module (cosine similarity or cross-attention, see `alignment_mode`) and a classifier that emits the global verification score. A CTC head over lip frames adds an alignment-aware feature.
 
-## 🧠 Model Architecture
+On top of that, VFA-style heads provide per-token output: a per-frame token-posterior head and a boundary head drive a Viterbi forced aligner (port of the method from `Visual-Forced-Alignment`), giving each word/digit a time span. A per-token verification head, trained on positives and single-substitution negatives, scores whether each token is actually being articulated. Details and diagrams: `architecture.md`.
 
-```text
-    [Lip Video Frames]                   [Text Transcript]
-     (T x 3 x 96 x 96)                     (Phoneme Seq)
-           │                                    │
-           ▼                                    ▼
-   ┌───────────────────┐               ┌───────────────────┐
-   │   LIP ENCODER     │               │   TEXT ENCODER    │
-   │ ----------------- │               │ ----------------- │
-   │ 1. ResNet18       │               │ 1. Embedding Layer│
-   │ 2. Transformer    │               │ 2. Transformer    │
-   │    Encoder        │               │    Encoder        │
-   └───────────────────┘               └───────────────────┘
-           │                                    │
-           ▼                                    ▼
-   (T x Feature_Dim)                    (L x Feature_Dim)
-           │                                    │
-           └───────────────┐  ┌─────────────────┘
-                           ▼  ▼
-                ┌─────────────────────────┐
-                │ CROSS-MODAL ALIGNMENT   │
-                │ ----------------------- │
-                │ Multi-Head Cross        │
-                │ Attention               │
-                └─────────────────────────┘
-                           │
-                           ▼
-                ┌─────────────────────────┐
-                │    VERIFICATION HEAD    │
-                │ ----------------------- │
-                │ 1. Feature Pooling      │
-                │ 2. Concatenation        │
-                │ 3. MLP + Sigmoid        │
-                └─────────────────────────┘
-                           │
-                           ▼
-                   [Alignment Score]
-                      (0.0 - 1.0)
-```
+## Usage
 
-### Component Breakdown
-1. **Lip Encoder:** Extracts visual speech fragments (visemes) from raw frames. We use a **ResNet18** backbone to learn high-level spatial features for each individual frame. The continuous stream of features is then passed through a **Transformer Encoder** to grasp the sequential temporal context (e.g., mouth opening, transitioning, closing).
-2. **Text Encoder:** Converts raw transcription words into mapped integer phoneme representations. These integers pass through a dense **Embedding Layer** followed by a **Transformer Encoder** to establish linguistic structure and grammatical bounds.
-3. **Cross-Modal Alignment Engine:** Translates between the visual and audio-text modalities. Utilizing **Multi-Head Cross Attention**, the phonemic sequence queries the visual viseme sequence. It identifies *where* and *when* specific vocal sounds occur within the video.
-4. **Verification Head:** Condenses the aligned structural matrix through pooling layers. The combined representations are routed through a Multi-Layer Perceptron (MLP) terminating in a strictly restricted Sigmoid activation, yielding the final alignment probability between `0` (Complete Desync) and `1` (Perfect Alignment).
-
----
-
-## ⚙️ Pipeline Overview
-
-### 1. Data Preprocessing
-The `GRIDDataset` loads speaker videos and alignment files.
-- **Cropping & Sizing:** Videos are actively tracked utilizing MediaPipe's FaceLandmarker, dynamically cropped tightly around the lips, and resized uniformly to `96x96`.
-- **Temporal extraction:** Video lengths are capped/padded to standard frame limits (e.g., 75 bounds) converting into unified PyTorch tensors.
-- **Transcript Parsing:** Transcript strings are mapped dynamically via `PhonemeConverter`.
-
-### 2. Training & Negative Sampling
-The loss relies on pushing mathematically correct sequences closer and forcing explicitly mismatched texts away.
-- **Negative Sampler:** To teach the model what a "mismatch" looks like, we generate a negative sample for every true pair during training by dynamically augmenting the text. Instead of relying purely on completely distinct sentences, we randomly select from 3 strategic distortions:
-  - **`wrong` / `random`**: Selects a completely random unrelated sentence from the dataset pool. 
-    *(Example: "bin blue at f two now" ➔ "lay red with c nine please")*
-  - **`shuffled`**: Randomizes the word order of the original transcript to force learning sequential temporal positioning. 
-    *(Example: "bin blue at f two now" ➔ "now at blue f bin two")*
-  - **`phoneme_similar`**: Selectively replaces a specific word with another valid GRID vocabulary word (such as swapping a color target). This ensures localized visual scrutiny prevents cheating via contextual sentence lengths. 
-    *(Example: "bin blue at f two now" ➔ "bin red at f two now")*
-- **Losses:** We combine **Binary Cross Entropy (BCE)** against a hard classification label, supplemented by a **Contrastive Margin Loss** maximizing explicit structural margins away from mismatch traps.
-
-### 3. Evaluation
-Our runtime evaluation tracks:
-- **ROC AUC:** Area under the ROC curve tracking absolute classification separation.
-- **Alignment Accuracy:** Total accuracy thresholding exact temporal metric alignment limits strictly passing 50% probabilities.
-- **Score Margin:** The objective separation distance mapped between Valid Ground Truth and Synthesized Invalid metrics.
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-Make sure you have all necessary data and vision pip packages installed:
-```bash
-pip install torch torchvision torchaudio scikit-learn numpy mediapipe opencv-python tqdm
-```
-
-### 1. Preparing the GRID Dataset
-The pipeline natively processes real media from the GRID audiovisual dataset utilizing MediaPipe to track user bounds properly. **You must prepare the data before training the model.**
-
-1. Download the [GRID audiovisual sentence corpus](http://spandh.dcs.shef.ac.uk/gridcorpus/).
-2. Extract the speaker folders into `data/raw/` (or strictly alter `raw_data_dir` via `config.json`).
-3. Point your terminal at the pipeline directory and execute the setup loop dynamically ripping frames, scaling boundaries, and extracting audio parameters seamlessly:
+### Preprocessing
 
 ```bash
-python pipeline/data_preparation.py
+python pipeline/data_preparation.py --config config.grid.json
 ```
 
-This procedure actively constructs scaled `96x96` mp4 chunked archives, synchronized raw wav exports, and creates structured JSON manifest files (`train_split.json`, `val_split.json`, `test_split.json`).
+Crops the lip region with MediaPipe (96x96, 25 fps), exports wavs, and writes train/val/test splits. On the cluster, use `scripts/slurm/preprocess.sbatch`.
 
-### 2. Running the End-to-End Pipeline
-Once the `processed` data directory is populated, you can run the full pipeline encompassing training splits, batch evaluations, and validation outputs simply by running:
-```bash
-`torchrun --nproc_per_node=2 main.py`
-```
-
-### 3. Example Inference Output
-When evaluating specific subsets or running `./inference.py`, the system outputs clean probability targets estimating structural similarities:
-
-```text
-Evaluating Model on Hold-out Test Set...
-Final Test Result -> AUC: 0.9421 | Align Acc: 0.9100
-
-Inference Output Demo:
-Transcript: bin blue at f two now
-Alignment Score: 0.8923
-------------------------------
-Transcript: lay green by g zero please
-Alignment Score: 0.1235
-------------------------------
-```
-
-**Per-token JSON report (`--json`).** Add `--json <path>` to the inference call to write a machine-readable report alongside the console output:
+### Training
 
 ```bash
-python inference.py --video data/processed/subset_1/s1/video/123.mp4 \
-                    --text "1 2 3" --dataset digit --json report.json
+torchrun --nproc_per_node=2 main.py --config config.grid.json
 ```
 
-The JSON contains the global scores plus one row per transcript token. Each row carries the Viterbi-decoded time span in seconds, an `alignment_score` (**non-semantic**: the mean of the frame posterior and the cross-modal word score over the span — how well the mouth traces that token's timeline), and a `verification_score` (**semantic**: the word-head sigmoid, thresholded at the EER-calibrated threshold into `MATCH`/`MISMATCH`). `low_confidence` is set when the video was too short for Viterbi and uniform spans were used as a fallback:
+Config files: `config.grid.json` / `config.digit.json` (checkpoints and logs go to `output_dir`; per-dataset lambdas for the CTC, alignment, frame-CE, boundary, and per-token losses are in the same file). On the cluster:
+
+```bash
+mkdir -p logs
+sbatch scripts/slurm/train.sbatch                       # grid, 1 GPU
+sbatch --gres=gpu:2 --export=NGPUS=2 scripts/slurm/train.sbatch
+sbatch --export=DATASET=digit scripts/slurm/train.sbatch
+```
+
+### Evaluation
+
+```bash
+python test.py --config config.grid.json
+```
+
+Reports AUC / accuracy / EER on the hold-out set and writes `eer_thresholds.json` next to the checkpoints, which inference auto-discovers for MATCH/MISMATCH decisions.
+
+### Inference
+
+```bash
+python inference.py --video clip.mp4 --text "bin blue at f two now" --dataset grid
+python inference.py --video clip.mp4 --text "1 2 3" --dataset digit --json report.json
+```
+
+Prints global verification and alignment scores with decisions at the EER-optimal thresholds, plus a per-token table (timestamps, alignment score, verification score). With `--json`:
 
 ```json
 {
-  "global": {
-    "verification_score": 0.9384,
-    "alignment_score": 0.9127
-  },
+  "global": {"verification_score": 0.9384, "alignment_score": 0.9127, "verdict": "MATCH"},
   "tokens": [
-    {"token": "1", "start_s": 0.32,  "end_s": 0.68,  "alignment_score": 0.9102, "verification_score": 0.9741, "verdict": "MATCH",    "low_confidence": false},
-    {"token": "2", "start_s": 0.68,  "end_s": 1.05,  "alignment_score": 0.9233, "verification_score": 0.9618, "verdict": "MATCH",    "low_confidence": false},
-    {"token": "3", "start_s": 1.05,  "end_s": 1.44,  "alignment_score": 0.8955, "verification_score": 0.2214, "verdict": "MISMATCH", "low_confidence": false}
+    {"token": "1", "start_s": 0.32, "end_s": 0.68, "alignment_score": 0.9102,
+     "verification_score": 0.9741, "verdict": "MATCH", "low_confidence": false},
+    {"token": "3", "start_s": 1.05, "end_s": 1.44, "alignment_score": 0.8955,
+     "verification_score": 0.2214, "verdict": "MISMATCH", "low_confidence": false}
   ]
 }
 ```
 
-GRID rows are per-phoneme; digit rows per-digit. Checkpoints trained without the VFA heads (`vfa_heads` stamp missing) disable the per-token output with a printed note and report `"tokens": null`.
+Per-token `alignment_score` is non-semantic (frame posterior averaged with the cross-modal word score); `verification_score` is semantic (word-head sigmoid). GRID rows are per-phoneme, digit rows per-digit. Checkpoints trained before the VFA heads load with the per-token output disabled (`"tokens": null`).
+
+## Training data
+
+Negatives are generated per positive by the negative sampler: random or shuffled transcripts, single-word/digit substitutions, and lexically similar hard negatives. Single-substitution negatives also carry per-token labels, which is what teaches the per-token head to localize the wrong token.
+
+## Repository layout
+
+- `models/` — encoders, cross-modal alignment, verification model, VFA heads
+- `dataset/` — GRID/digit loaders, lip-crop preprocessing
+- `training/`, `evaluation/` — training loop and losses, metrics
+- `pipeline/` — data preparation
+- `utils/` — phoneme conversion, negative sampling, Viterbi aligner, checkpoint/config helpers
+- `scripts/slurm/` — train / test / preprocess sbatch scripts

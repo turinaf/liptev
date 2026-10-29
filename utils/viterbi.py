@@ -106,24 +106,55 @@ def viterbi_align(logits, labels, bound_probs=None, boundary_threshold=0.8):
     return frame_to_label
 
 
-def token_spans(frame_to_label, n_tokens):
+def token_spans(frame_to_label, labels):
     """Group consecutive frames into (token_position, start, end) spans.
 
-    `frame_to_label` holds class ids; token_position is the 0-based index of a
-    non-zero class among the distinct non-zero classes in order of appearance.
-    Tokens that never appear are omitted from the result.
+    `frame_to_label` holds class ids from a monotonic alignment; `labels` is
+    the forced-order label sequence that produced it (typically
+    [0] + token_ids + [0], class 0 = silence). Positions are per occurrence:
+    the entry at labels[i] gets position i - 1, so repeated tokens keep one
+    span each. Runs and label entries are paired in order; a run covering k
+    consecutive identical entries is split uniformly across them, and a run
+    shorter than k covers as far as possible with trailing occurrences
+    omitted.
     """
-    spans = []
+    labels = list(labels)
+
+    # Maximal runs of one non-zero class id in the alignment.
+    runs = []
     current_label, start = None, None
     for t, label in enumerate(list(frame_to_label) + [0]):
         if label != current_label:
             if current_label not in (None, 0):
-                spans.append((current_label, start, t))
+                runs.append((current_label, start, t))
             current_label, start = label, t
-    # Map class ids to positions in order of first appearance.
-    order = []
-    for label, _, _ in spans:
-        if label not in order:
-            order.append(label)
-    remap = {label: i for i, label in enumerate(order)}
-    return [(remap[label], s, e) for label, s, e in spans]
+
+    spans = []
+    ri = 0
+    i = 0
+    while ri < len(runs) and i < len(labels):
+        if labels[i] == 0:
+            i += 1
+            continue
+        # Consecutive identical entries are covered by one run.
+        j = i
+        while j < len(labels) and labels[j] == labels[i]:
+            j += 1
+        k = j - i
+        cls, s, e = runs[ri]
+        ri += 1
+        length = e - s
+        if length <= k:
+            # Short run: 1 frame per occurrence as far as possible; the
+            # trailing occurrences get no span.
+            for off in range(length):
+                spans.append((i + off - 1, s + off, s + off + 1))
+        else:
+            base, extra = divmod(length, k)
+            cursor = s
+            for off in range(k):
+                end = cursor + base + (1 if off < extra else 0)
+                spans.append((i + off - 1, cursor, end))
+                cursor = end
+        i = j
+    return spans

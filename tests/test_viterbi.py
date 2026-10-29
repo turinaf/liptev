@@ -51,13 +51,27 @@ def test_viterbi_short_video_returns_uniform():
 
 
 def test_token_spans_groups_consecutive_frames():
-    spans = token_spans([0, 0, 5, 5, 5, 9, 0], n_tokens=2)
-    # frame_to_label holds class ids; position = index among real tokens
+    spans = token_spans([0, 0, 5, 5, 5, 9, 0], [0, 5, 9, 0])
+    # frame_to_label holds class ids; position = labels index - 1
     assert spans == [(0, 2, 5), (1, 5, 6)]
 
 
 def test_token_spans_omits_unassigned_tokens():
-    assert token_spans([0, 0, 5, 5], n_tokens=2) == [(0, 2, 4)]
+    assert token_spans([0, 0, 5, 5], [0, 5, 9, 0]) == [(0, 2, 4)]
+
+
+def test_token_spans_splits_repeated_token_run():
+    # "7 7" style transcripts: one run of class 5 covering two occurrences
+    # in labels is split uniformly into contiguous per-occurrence spans.
+    spans = token_spans([0, 5, 5, 5, 5, 5, 5, 0], [0, 5, 5, 0])
+    assert spans == [(0, 1, 4), (1, 4, 7)]
+
+
+def test_token_spans_omits_trailing_occurrences_of_short_run():
+    # A run shorter than the occurrence count covers as far as possible;
+    # trailing occurrences are omitted, never duplicated.
+    spans = token_spans([0, 0, 5, 0, 0], [0, 5, 5, 0])
+    assert spans == [(0, 2, 3)]
 
 
 def test_uniform_token_spans_contiguous_cover():

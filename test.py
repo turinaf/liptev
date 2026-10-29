@@ -8,7 +8,7 @@ from models.verification_model import LipTextVerificationModel
 from evaluation.evaluate import evaluate_model
 from evaluation.metrics import save_eer_thresholds
 from utils.dataset_utils import collate_fn_factory, Config
-from utils.checkpoint import resolve_alignment_mode
+from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads
 from dataset.digit_loader import DigitDataset
 
 
@@ -43,6 +43,20 @@ def _resolve_latest_checkpoint(output_dir_abs):
 
     candidates.sort(key=extract_epoch)
     return candidates[-1]
+
+def build_eval_model(checkpoint, cfg, vocab_size, device):
+    """Model for strict checkpoint loading. Both stamps come from the
+    checkpoint, never config: the scoring mode because the classifier and the
+    EER calibration were produced under it, and the VFA-head flag because a
+    legacy state dict (pre-VFA) strict-loads only into use_vfa=False."""
+    alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
+    return LipTextVerificationModel(
+        vocab_size=vocab_size,
+        feature_dim=256,
+        lip_backbone_pretrained=cfg.lip_backbone_pretrained,
+        alignment_mode=alignment_mode,
+        use_vfa=resolve_vfa_heads(checkpoint)
+    ).to(device)
 
 def test():
     cfg = Config("config.json")
@@ -97,21 +111,12 @@ def test():
         else:
             clean_state_dict[k] = v
 
-    # The checkpoint's stamp wins over config: the classifier and the EER
-    # calibration were produced under the checkpoint's scoring mode.
-    alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
-
     print("Initializing model...")
     if cfg.dataset == "digit":
         vocab_size = 13  # 0-9, !, <pad>, <unk>
     else:
         vocab_size = 41  # PhonemeConverter vocab used in training
-    model = LipTextVerificationModel(
-        vocab_size=vocab_size,
-        feature_dim=256,
-        lip_backbone_pretrained=cfg.lip_backbone_pretrained,
-        alignment_mode=alignment_mode
-    ).to(device)
+    model = build_eval_model(checkpoint, cfg, vocab_size, device)
 
     model.load_state_dict(clean_state_dict)
     

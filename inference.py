@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import os
 import json
+import wave
 
 os.environ['GLOG_minloglevel'] = '2' # Suppress mediapipe C++ logging
 
@@ -34,13 +35,21 @@ def resolve_thresholds_path(requested_path, checkpoint_path):
             return candidate
     return None
 
+def score_verdict(score, block):
+    """The EER-threshold MATCH/MISMATCH call for a score. Without a
+    calibration threshold the raw score has no meaningful 0.5 cut, so the
+    verdict is 'uncalibrated' instead of pretending."""
+    thr = block.get("threshold") if isinstance(block, dict) else None
+    if thr is None:
+        return "uncalibrated"
+    return "MATCH" if score >= thr else "MISMATCH"
+
 def format_score_decision(label, score, block):
     """One report line: raw score plus the MATCH/MISMATCH call at the
-    EER-optimal threshold. Without calibration the raw score has no
-    meaningful 0.5 cut, so say so instead of pretending."""
-    if not block or block.get("threshold") is None:
+    EER-optimal threshold."""
+    decision = score_verdict(score, block)
+    if decision == "uncalibrated":
         return f"{label}: {score:.4f}  ->  uncalibrated (no EER threshold available)"
-    decision = "MATCH" if score >= block["threshold"] else "MISMATCH"
     return (f"{label}: {score:.4f}  ->  {decision} "
             f"(EER thr {block['threshold']:.4f}, EER {block['eer']:.4f})")
 
@@ -58,7 +67,7 @@ def build_token_report(tokens, spans, seconds_per_frame, posterior_scores,
     cross-modal word score), verification score, verdict, confidence flag."""
     ver_thr = (thresholds or {}).get("verification") or {}
     ver_thr = ver_thr.get("threshold") if isinstance(ver_thr, dict) else ver_thr
-    by_pos = {pos: (s, e) for pos, s, e in spans}
+    by_pos = {pos: (s, e) for pos, s, e in spans if e > s}
     rows = []
     for i, tok in enumerate(tokens):
         span = by_pos.get(i)
@@ -76,14 +85,90 @@ def build_token_report(tokens, spans, seconds_per_frame, posterior_scores,
         else:
             align = 0.5 * (post + word)
         verif = verification_scores[i]
-        verdict = "uncalibrated" if (ver_thr is None or verif is None) else \
-            ("MATCH" if verif >= ver_thr else "MISMATCH")
+        verdict = "uncalibrated" if verif is None else \
+            score_verdict(verif, {"threshold": ver_thr})
         rows.append({"token": tok, "start_s": round(s * seconds_per_frame, 3),
                      "end_s": round(e * seconds_per_frame, 3),
                      "alignment_score": round(align, 4) if align is not None else None,
                      "verification_score": round(verif, 4) if verif is not None else None,
                      "verdict": verdict, "low_confidence": fallback})
     return rows
+
+def spans_to_score_maps(spans, posterior_scores, verif_scores, word_scores=None):
+    """Per-token score maps keyed by token position.
+
+    Zero-length spans (video shorter than the transcript) are dropped:
+    averaging over an empty frame range yields NaN, so their tokens take the
+    missing-span path in build_token_report (nulls + low_confidence)."""
+    post_by_pos, ws_by_pos, ver_by_pos = {}, {}, {}
+    for (pos, s, e), post, verif in zip(spans, posterior_scores, verif_scores):
+        if e <= s:
+            continue
+        post_by_pos[pos] = post
+        ver_by_pos[pos] = verif
+        if word_scores is not None:
+            ws_by_pos[pos] = word_scores[pos]
+    return post_by_pos, ws_by_pos, ver_by_pos
+
+def rescale_word_scores(word_scores_t):
+    """Raw cosine word scores in [-1, 1] -> [0, 1], matching the posterior
+    and verification scales the per-token report averages."""
+    return ((word_scores_t + 1.0) / 2.0).clamp(0.0, 1.0)
+
+def resolve_video_fps(video_path, dataset, cap_fps=None):
+    """Timestamp conversion rate for the input video. Returns (fps, source).
+
+    Processed digit videos carry a wrong 25 fps container label, so for the
+    digit dataset the true rate is resolved in order: meta.json source_fps
+    (next to the video, then the speaker level above it) -> a sibling .wav's
+    duration over the cv2 frame count -> the container probe. GRID keeps the
+    container probe."""
+    if cap_fps is None or cap_fps != cap_fps or cap_fps <= 0:
+        cap_fps = None
+
+    if dataset != "digit":
+        if cap_fps is None:
+            return 25.0, "default 25 fps"
+        return cap_fps, "container"
+
+    video_dir = os.path.dirname(os.path.abspath(video_path))
+    base = os.path.splitext(os.path.basename(video_path))[0]
+
+    for meta_dir in (video_dir, os.path.dirname(video_dir)):
+        meta_path = os.path.join(meta_dir, "meta.json")
+        if not os.path.exists(meta_path):
+            continue
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue
+        entry = None
+        if isinstance(meta, dict):
+            entry = meta.get(base)
+            if not isinstance(entry, dict):
+                entry = meta if "source_fps" in meta else None
+        fps = entry.get("source_fps") if isinstance(entry, dict) else None
+        if fps and fps > 0:
+            return float(fps), f"meta.json ({meta_path})"
+
+    wav_path = os.path.join(video_dir, base + ".wav")
+    if os.path.exists(wav_path):
+        try:
+            cap = cv2.VideoCapture(video_path)
+            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            cap.release()
+            with wave.open(wav_path, "rb") as w:
+                duration = w.getnframes() / float(w.getframerate())
+            fps = frames / duration if frames > 0 and duration > 0 else None
+            if fps and 20.0 <= fps <= 35.0:
+                return round(fps, 3), f"sibling wav duration ({os.path.basename(wav_path)})"
+        except Exception:
+            pass
+
+    if cap_fps is None:
+        return 25.0, "default 25 fps"
+    return cap_fps, "container"
 
 def parse_input_text(text, dataset):
     if dataset == 'grid':
@@ -296,10 +381,10 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
             else "Per-token alignment:"
         print(header)
         cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS) if cap else 0
+        cap_fps = cap.get(cv2.CAP_PROP_FPS) if cap else 0
         cap.release()
-        if not fps or fps != fps:   # 0 or NaN
-            fps = 25.0
+        fps, fps_source = resolve_video_fps(video_path, dataset, cap_fps)
+        print(f"Timestamp rate: {fps:.3f} fps (source: {fps_source})")
         with torch.no_grad():
             frame_logits = align_out["vfa_frame_logits"][0, :true_video_len]
             bound_probs = torch.sigmoid(align_out["vfa_bound_logits"][0, :true_video_len]).cpu().numpy()
@@ -311,29 +396,32 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
                 f2l = viterbi_align(frame_logits, labels, bound_probs,
                                     boundary_threshold=cfg.vfa_boundary_threshold)
                 spans = token_spans(f2l, labels)
+            # Video shorter than the transcript: the uniform split degenerates
+            # to zero-length spans; drop them so those tokens report missing
+            # (nulls, low confidence) instead of NaN scores.
+            valid_spans = [(pos, s, e) for pos, s, e in spans if e > s]
             posteriors = torch.softmax(frame_logits, dim=-1).cpu()
-            posterior_scores = []
-            for pos, s, e in spans:
-                cls = phones[pos]
-                posterior_scores.append(posteriors[s:e, cls].mean().item())
+            posterior_scores = [posteriors[s:e, phones[pos]].mean().item()
+                                for pos, s, e in valid_spans]
             onehot = spans_to_onehot(spans, true_video_len, len(phones)).unsqueeze(0).to(device)
             logits, mask = model.score_word_spans(
                 align_out["lip_feats"][:, :true_video_len],
                 align_out["text_feats"], onehot)
             verif_scores = torch.sigmoid(logits)[0].cpu().tolist()
-            # map scores back onto token positions (spans may skip tokens)
-            post_by_pos = {pos: v for (pos, _, _), v in zip(spans, posterior_scores)}
             # Cross-modal word scores (B x L) from the alignment module — a
             # different signal than the word-head verification sigmoid below.
+            # Raw cosines in [-1, 1] must be rescaled to the [0, 1] scale the
+            # report mixes with posteriors/verification.
             word_scores_t = align_out.get("word_scores")
-            ws_by_pos = {}
+            ws_list = None
             if word_scores_t is not None:
-                ws = word_scores_t[0].detach().cpu().tolist()
-                ws_by_pos = {pos: ws[pos] for pos, _, _ in spans}
-            ver_by_pos = {pos: v for (pos, _, _), v in zip(spans, verif_scores)}
+                ws_list = rescale_word_scores(word_scores_t[0]).detach().cpu().tolist()
+            # map scores back onto token positions (spans may skip tokens)
+            post_by_pos, ws_by_pos, ver_by_pos = spans_to_score_maps(
+                valid_spans, posterior_scores, verif_scores, ws_list)
             n_tokens = len(token_names)
             token_rows = build_token_report(
-                token_names, spans, 1.0 / fps,
+                token_names, valid_spans, 1.0 / fps,
                 [post_by_pos.get(i) for i in range(n_tokens)],
                 [ws_by_pos.get(i) for i in range(n_tokens)],
                 [ver_by_pos.get(i) for i in range(n_tokens)],
@@ -346,7 +434,11 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
         print("Per-token timestamps/scores unavailable (checkpoint has no VFA heads).")
 
     result = {
-        "global": {"verification_score": prob, "alignment_score": align_prob},
+        "global": {
+            "verification_score": prob,
+            "alignment_score": align_prob,
+            "verdict": score_verdict(prob, (calib or {}).get("verification")),
+        },
         "tokens": token_rows,
     }
     if json_path:

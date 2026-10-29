@@ -39,6 +39,18 @@ class Config:
         # Fallback fps for .lab second->frame conversion when meta.json is absent
         self.digit_source_fps = cfg.get("digit_source_fps", 29.87)
 
+def substitution_position(pos_words, neg_words):
+    """Index of the single differing token between two same-length token
+    lists, or None (identical, different lengths, or >1 differences). Used to
+    decide whether a negative pair admits per-token supervision: exactly one
+    substituted token means every other token is still articulated by the
+    video, so "which token is wrong" is well defined."""
+    if len(pos_words) != len(neg_words):
+        return None
+    diffs = [i for i, (p, n) in enumerate(zip(pos_words, neg_words)) if p != n]
+    return diffs[0] if len(diffs) == 1 else None
+
+
 def collate_fn_factory(dataset_name, transcript_pool=None):
     converter = PhonemeConverter() if dataset_name != "digit" else None
     global_sampler = NegativeSampler(transcript_pool or [], dataset_name=dataset_name)
@@ -56,6 +68,9 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
         # Per-sample boundary times for the POSITIVE pair only (a negative
         # transcript contradicts the video, so it has no valid alignment).
         token_times_list, use_audio = [], 'audio' in batch[0]
+        # Per-token verification supervision: boundary times and 0/1 labels
+        # for pairs where per-token supervision is meaningful.
+        word_token_times_list, word_label_rows = [], []
 
         for item in batch:
             vid, trans = item['video'], item['transcript']
@@ -82,6 +97,11 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             phonemes_indices_list.append(torch.tensor(pos_indices, dtype=torch.long))
             token_times_list.append(token_times)
 
+            # Per-token verification supervision (positives: every token 1)
+            word_token_times_list.append(token_times)
+            n_tok = len(pos_indices)
+            word_label_rows.append(torch.ones(n_tok))
+
             labels.append(1.0)
             transcripts.append(trans)
             video_lens.append(int(item.get('video_len', vid.shape[0])))
@@ -97,6 +117,46 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             else:
                 neg_indices = converter.flatten_per_word(converter.text_to_phoneme_indices_per_word(neg_trans))
             phonemes_indices_list.append(torch.tensor(neg_indices, dtype=torch.long))
+
+            # Per-token supervision: only single-substitution negatives have
+            # a well-defined "wrong token" (others: masked). Spans copy the
+            # positive's geometry with the substituted token ids swapped in.
+            pos_words = trans.split() if dataset_name == "digit" \
+                else [w for w, _ in (converter.text_to_phoneme_indices_per_word(trans))]
+            neg_words = neg_trans.split() if dataset_name == "digit" \
+                else [w for w, _ in (converter.text_to_phoneme_indices_per_word(neg_trans))]
+            sub_pos = substitution_position(pos_words, neg_words) if token_times else None
+
+            if sub_pos is not None:
+                if dataset_name == "digit":
+                    # digit token_times: [([id], fs, fe)] per position
+                    neg_times = [list(t) for t in token_times]
+                    neg_times[sub_pos] = [neg_indices[sub_pos]], neg_times[sub_pos][1], neg_times[sub_pos][2]
+                    word_token_times_list.append(neg_times)
+                    labels_row = torch.ones(len(neg_indices))
+                    labels_row[sub_pos] = 0.0
+                    word_label_rows.append(labels_row)
+                else:
+                    # GRID token_times: [(ids, fs, fe)] per word; the swapped
+                    # word's phonemes get the positive word's frame range.
+                    if len(neg_words) == len(token_times):
+                        neg_per_word = converter.text_to_phoneme_indices_per_word(neg_trans)
+                        neg_times = [list(t) for t in token_times]
+                        _, fs, fe = token_times[sub_pos]
+                        neg_times[sub_pos] = (neg_per_word[sub_pos][1], fs, fe)
+                        word_token_times_list.append(neg_times)
+                        labels_row = torch.ones(len(neg_indices))
+                        off = sum(len(t[0]) for t in token_times[:sub_pos])
+                        for k in range(len(neg_per_word[sub_pos][1])):
+                            labels_row[off + k] = 0.0
+                        word_label_rows.append(labels_row)
+                    else:
+                        word_token_times_list.append([])
+                        word_label_rows.append(None)
+                        sub_pos = None
+            else:
+                word_token_times_list.append([])
+                word_label_rows.append(None)
             token_times_list.append([])
 
             labels.append(0.0)
@@ -141,6 +201,21 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             speech_mask[i, :video_lens[i]] = speech
             has_align_target[i] = 1.0
 
+        # Per-token verification supervision tensors. word_spans mirrors
+        # alignment_targets but is also built for substitution negatives
+        # (whose frames still articulate every token except the swap).
+        word_spans = torch.zeros(B, max_t, L)
+        word_labels = torch.zeros(B, L)
+        word_label_mask = torch.zeros(B, L, dtype=torch.bool)
+        for i, (wt, row) in enumerate(zip(word_token_times_list, word_label_rows)):
+            if not wt or row is None:
+                continue
+            ranges = expand_token_ranges(wt)
+            spans_t, _ = build_alignment_targets(ranges, video_lens[i], L)
+            word_spans[i, :video_lens[i]] = spans_t
+            word_labels[i, :row.shape[0]] = row
+            word_label_mask[i, :row.shape[0]] = True
+
         batch_dict = {
             'video': videos,
             'phonemes': padded_phonemes,
@@ -150,7 +225,10 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             'transcript': transcripts,
             'alignment_targets': alignment_targets,
             'speech_mask': speech_mask,
-            'has_align_target': has_align_target
+            'has_align_target': has_align_target,
+            'word_labels': word_labels,
+            'word_label_mask': word_label_mask,
+            'word_spans': word_spans
         }
         if use_audio:
             batch_dict['audio'] = audios

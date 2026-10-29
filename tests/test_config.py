@@ -22,3 +22,11 @@ def test_config_mp_model_path_has_default():
     # inference degrades to the repo-root landmarker, not an AttributeError.
     cfg = Config("tests/definitely_missing_config.json")
     assert cfg.mp_model_path == "face_landmarker.task"
+
+
+def test_vfa_defaults():
+    cfg = Config()
+    assert cfg.lambda_frame_ce == 1.0
+    assert cfg.lambda_boundary == 1.0
+    assert cfg.lambda_word_verif == 1.0
+    assert cfg.vfa_boundary_threshold == 0.8

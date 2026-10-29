@@ -11,11 +11,22 @@ lambda_align cannot act in the chosen mode.
 import torch
 
 
-def save_checkpoint(state_dict, path, alignment_mode):
+def save_checkpoint(state_dict, path, alignment_mode, vfa_heads=True):
     torch.save(
-        {"model_state_dict": state_dict, "alignment_mode": alignment_mode},
+        {"model_state_dict": state_dict, "alignment_mode": alignment_mode,
+         "vfa_heads": vfa_heads},
         path,
     )
+
+
+def resolve_vfa_heads(checkpoint):
+    """True only if the checkpoint was trained with the VFA heads. Old
+    checkpoints predate the stamp and must be evaluated with use_vfa=False
+    (strict load); say so instead of silently scoring garbage head outputs."""
+    if isinstance(checkpoint, dict) and checkpoint.get("vfa_heads"):
+        return True
+    print("Note: checkpoint has no VFA heads; per-token timestamps/scores disabled.")
+    return False
 
 
 def resolve_alignment_mode(checkpoint, config_mode):

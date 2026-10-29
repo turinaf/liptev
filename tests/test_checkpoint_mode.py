@@ -14,6 +14,7 @@ from utils.checkpoint import (
     save_checkpoint,
     resolve_alignment_mode,
     check_alignment_supervision,
+    resolve_vfa_heads,
 )
 
 
@@ -86,3 +87,15 @@ def test_check_alignment_supervision_silent_when_supervision_active(capsys):
     check_alignment_supervision("both", 5.0)
     check_alignment_supervision("attn", 0.0)
     assert capsys.readouterr().out == ""
+
+
+def test_vfa_stamp_roundtrip(tmp_path):
+    path = str(tmp_path / "ck.pt")
+    save_checkpoint({}, path, alignment_mode="sim", vfa_heads=True)
+    ckpt = torch.load(path)
+    assert resolve_vfa_heads(ckpt) is True
+
+
+def test_missing_stamp_resolves_false(capsys):
+    assert resolve_vfa_heads({"alignment_mode": "sim"}) is False
+    assert "vfa" in capsys.readouterr().out.lower()

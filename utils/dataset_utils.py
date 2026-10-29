@@ -36,6 +36,12 @@ class Config:
         # Alignment scoring path: "sim" (cosine matrix), "attn"
         # (cross-attention), or "both" (average)
         self.alignment_mode = cfg.get("alignment_mode", "sim")
+        # VFA head losses (frame token CE, boundary BCE, per-token verification
+        # BCE) and the boundary probability that forces a Viterbi transition.
+        self.lambda_frame_ce = cfg.get("lambda_frame_ce", 1.0)
+        self.lambda_boundary = cfg.get("lambda_boundary", 1.0)
+        self.lambda_word_verif = cfg.get("lambda_word_verif", 1.0)
+        self.vfa_boundary_threshold = cfg.get("vfa_boundary_threshold", 0.8)
         # Fallback fps for .lab second->frame conversion when meta.json is absent
         self.digit_source_fps = cfg.get("digit_source_fps", 29.87)
 

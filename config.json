@@ -18,5 +18,9 @@
     "lambda_align": 1.0,
     "alignment_temperature": 1.0,
     "alignment_mode": "sim",
+    "lambda_frame_ce": 1.0,
+    "lambda_boundary": 1.0,
+    "lambda_word_verif": 1.0,
+    "vfa_boundary_threshold": 0.8,
     "output_dir": "./exp/grid/no_audio"
 }

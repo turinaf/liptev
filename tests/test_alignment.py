@@ -318,6 +318,32 @@ def test_mel_domain_mask_boundary():
     assert mel_mask.tolist() == [[False, False, True, True, True]]
 
 
+# --- frame/boundary target helpers (VFA supervision) -----------------------
+
+from utils.alignment import frame_token_targets
+
+
+def test_frame_token_targets_maps_columns_to_token_ids():
+    # 1 sample, 4 frames, 2 token columns; column 0 holds token id 5,
+    # column 1 holds token id 9.
+    targets = torch.zeros(1, 4, 2)
+    targets[0, 0:2, 0] = 1.0
+    targets[0, 2:4, 1] = 1.0
+    phonemes = torch.tensor([[5, 9]])
+    ids, boundary = frame_token_targets(targets, phonemes)
+    assert ids.tolist() == [[5, 5, 9, 9]]
+    # boundary fires on the first frame of each new token except frame 0
+    assert boundary.tolist() == [[0.0, 0.0, 1.0, 0.0]]
+
+
+def test_frame_token_targets_unsupervised_frames_are_zero():
+    targets = torch.zeros(1, 3, 1)          # all-zero rows: no supervision
+    phonemes = torch.tensor([[7]])
+    ids, boundary = frame_token_targets(targets, phonemes)
+    assert ids.tolist() == [[0, 0, 0]]
+    assert boundary.tolist() == [[0.0, 0.0, 0.0]]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

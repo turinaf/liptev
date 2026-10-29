@@ -90,3 +90,21 @@ def build_alignment_targets(token_ranges, video_len, target_len):
             speech_mask[start:end] = True
 
     return targets, speech_mask
+
+
+def frame_token_targets(alignment_targets, phonemes):
+    """Per-frame token ids and boundary flags from one-hot alignment targets.
+
+    alignment_targets: B x T x L one-hot rows (zeros = unsupervised frame);
+    phonemes: B x L padded token ids. Returns (ids B x T long, boundary B x T
+    float). boundary[t] = 1 where the assigned column changes from t-1 to t;
+    unsupervised frames get id 0 and no boundary.
+    """
+    supervised = alignment_targets.sum(dim=-1) > 0              # B x T
+    cols = alignment_targets.argmax(dim=-1)                     # B x T
+    ids = torch.gather(phonemes, 1, cols.clamp(min=0))          # B x T
+    ids = torch.where(supervised, ids, torch.zeros_like(ids))
+    change = supervised[:, 1:] & supervised[:, :-1] & (cols[:, 1:] != cols[:, :-1])
+    boundary = torch.zeros_like(ids, dtype=torch.float32)
+    boundary[:, 1:] = change.float()
+    return ids, boundary

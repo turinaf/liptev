@@ -5,10 +5,11 @@ from .lip_encoder import LipEncoder, masked_mean
 from .text_encoder import TextEncoder
 from .cross_modal_alignment import CrossModalAlignment
 from .audio_encoder import AudioEncoder
+from .vfa_heads import VFAHeads, WordVerificationHead, pool_tokens
 
 class LipTextVerificationModel(nn.Module):
     def __init__(self, vocab_size=50, feature_dim=256, lip_backbone_pretrained=True,
-                 alignment_mode="sim"):
+                 alignment_mode="sim", use_vfa=True):
         super(LipTextVerificationModel, self).__init__()
         self.vocab_size = vocab_size
         self.lip_encoder = LipEncoder(feature_dim, backbone_pretrained=lip_backbone_pretrained)
@@ -35,6 +36,13 @@ class LipTextVerificationModel(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 1)
         )
+
+        # VFA heads are optional so checkpoints trained before them keep
+        # strict-loading (use_vfa=False omits the parameters entirely).
+        self.use_vfa = use_vfa
+        if use_vfa:
+            self.vfa_heads = VFAHeads(vocab_size, feature_dim)
+            self.word_head = WordVerificationHead(feature_dim)
 
     def _ctc_terms(self, lip_feats, phoneme_seqs, video_padding_mask, phoneme_padding_mask):
         """Per-sample CTC NLL normalized per target token.
@@ -78,7 +86,7 @@ class LipTextVerificationModel(nn.Module):
         return positions.unsqueeze(0) * hop_length >= audio_lens.unsqueeze(1)
 
     def forward(self, video_frames, phoneme_seqs, audio_features=None, video_padding_mask=None,
-                phoneme_padding_mask=None, audio_padding_mask=None):
+                phoneme_padding_mask=None, audio_padding_mask=None, word_spans=None):
         lip_feats = self.lip_encoder(video_frames, padding_mask=video_padding_mask)
         text_feats = self.text_encoder(phoneme_seqs, padding_mask=phoneme_padding_mask)
 
@@ -167,4 +175,24 @@ class LipTextVerificationModel(nn.Module):
         align_out["ctc_valid"] = ctc_valid
         align_out["consistency_logit"] = consistency_logit
 
+        if self.use_vfa:
+            align_out["vfa_frame_logits"] = self.vfa_heads.frame(lip_feats)
+            align_out["vfa_bound_logits"] = self.vfa_heads.boundary(lip_feats)
+            # Expose the pooled features so inference can score Viterbi spans
+            # without re-running the encoders.
+            align_out["lip_feats"] = lip_feats
+            align_out["text_feats"] = text_feats
+            if word_spans is not None:
+                pooled = pool_tokens(lip_feats, word_spans)
+                token_mask = word_spans.sum(dim=1) > 0
+                align_out["word_verif_logits"] = self.word_head(pooled, text_feats, token_mask)
+                align_out["word_token_mask"] = token_mask
+
         return consistency_score, align_out
+
+    def score_word_spans(self, lip_feats, text_feats, word_spans):
+        """Per-token verification logits for externally supplied spans (e.g.
+        Viterbi output at inference). Returns (logits B x L, token_mask B x L)."""
+        pooled = pool_tokens(lip_feats, word_spans)
+        token_mask = word_spans.sum(dim=1) > 0
+        return self.word_head(pooled, text_feats, token_mask), token_mask

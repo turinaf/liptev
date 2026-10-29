@@ -2,6 +2,7 @@ import torch
 import cv2
 import numpy as np
 import os
+import json
 
 os.environ['GLOG_minloglevel'] = '2' # Suppress mediapipe C++ logging
 
@@ -12,7 +13,8 @@ from dataset.preprocessing import extract_lip_frames
 from models.verification_model import LipTextVerificationModel
 from utils.phoneme_converter import PhonemeConverter
 from utils.dataset_utils import Config
-from utils.checkpoint import resolve_alignment_mode
+from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads
+from utils.viterbi import viterbi_align, token_spans, uniform_token_spans
 from evaluation.metrics import load_eer_thresholds
 import argparse
 import sys
@@ -41,6 +43,42 @@ def format_score_decision(label, score, block):
     decision = "MATCH" if score >= block["threshold"] else "MISMATCH"
     return (f"{label}: {score:.4f}  ->  {decision} "
             f"(EER thr {block['threshold']:.4f}, EER {block['eer']:.4f})")
+
+def spans_to_onehot(spans, T, L):
+    """(pos, start, end) spans -> T x L one-hot for token pooling."""
+    onehot = torch.zeros(T, L)
+    for pos, s, e in spans:
+        if pos < L:
+            onehot[s:e, pos] = 1.0
+    return onehot
+
+def build_token_report(tokens, spans, seconds_per_frame, posterior_scores,
+                       word_scores, verification_scores, thresholds, fallback):
+    """Per-token JSON rows: timestamps, alignment score (mean of posterior and
+    cross-modal word score), verification score, verdict, confidence flag."""
+    ver_thr = (thresholds or {}).get("verification") or {}
+    ver_thr = ver_thr.get("threshold") if isinstance(ver_thr, dict) else ver_thr
+    by_pos = {pos: (s, e) for pos, s, e in spans}
+    rows = []
+    for i, tok in enumerate(tokens):
+        span = by_pos.get(i)
+        if span is None:
+            rows.append({"token": tok, "start_s": None, "end_s": None,
+                         "alignment_score": None, "verification_score": None,
+                         "verdict": "uncalibrated", "low_confidence": True})
+            continue
+        s, e = span
+        align = 0.5 * (posterior_scores[i] + word_scores[i]) if posterior_scores[i] is not None \
+            else word_scores[i]
+        verif = verification_scores[i]
+        verdict = "uncalibrated" if (ver_thr is None or verif is None) else \
+            ("MATCH" if verif >= ver_thr else "MISMATCH")
+        rows.append({"token": tok, "start_s": round(s * seconds_per_frame, 3),
+                     "end_s": round(e * seconds_per_frame, 3),
+                     "alignment_score": round(align, 4) if align is not None else None,
+                     "verification_score": round(verif, 4) if verif is not None else None,
+                     "verdict": verdict, "low_confidence": fallback})
+    return rows
 
 def parse_input_text(text, dataset):
     if dataset == 'grid':
@@ -95,7 +133,8 @@ def resolve_checkpoint_path(requested_model_path, config_output_dir):
     return candidates[-1]
 
 
-def run_inference(video_path, transcript, model_path=None, dataset=None, thresholds_path=None):
+def run_inference(video_path, transcript, model_path=None, dataset=None, thresholds_path=None,
+                  json_path=None):
     cfg = Config("config.json")
     dataset = dataset or cfg.dataset
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -132,7 +171,8 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
         vocab_size=vocab_size,
         feature_dim=256,
         lip_backbone_pretrained=cfg.lip_backbone_pretrained,
-        alignment_mode=alignment_mode
+        alignment_mode=alignment_mode,
+        use_vfa=resolve_vfa_heads(checkpoint)
     ).to(device)
 
     model.load_state_dict(clean_state_dict)
@@ -140,23 +180,33 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
 
     print(f"Parsing transcript: '{transcript}'")
     if dataset == "digit":
-        digit_vocab = {str(i): i+1 for i in range(10)} 
+        digit_vocab = {str(i): i+1 for i in range(10)}
         digit_vocab["!"] = 11
         digit_vocab["<pad>"] = 0
         digit_vocab["<unk>"] = 12
         phones = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in transcript.split()]
+        # Report rows are per-token: one row per digit.
+        token_names = transcript.split()
     else:
         converter = PhonemeConverter()
         # Per-word phonemization — the same source the model is trained on
         # (the legacy whole-sentence path emitted <unk> for every space).
-        phones = converter.flatten_per_word(converter.text_to_phoneme_indices_per_word(transcript))
-        
+        per_word = converter.text_to_phoneme_indices_per_word(transcript)
+        phones = converter.flatten_per_word(per_word)
+        id_to_phoneme = {idx: ph for ph, idx in converter.vocab.items()}
+        # GRID rows are per-phoneme (spans are per-phoneme too).
+        token_names = [id_to_phoneme.get(idx, "<unk>") for _, ids in per_word for idx in ids]
+
     if len(phones) == 0:
         phones = [0]
+        token_names = ["<unk>"]
 
     # Keep a bounded sequence length to match training regime while retaining more transcript context.
     max_phone_len = 128
     phones = phones[:max_phone_len]
+    token_names = token_names[:len(phones)]
+    while len(token_names) < len(phones):
+        token_names.append("<unk>")
     phone_tensor = torch.tensor(phones, dtype=torch.long).unsqueeze(0).to(device) # Add batch dimension
     phoneme_padding_mask = phone_tensor.eq(0)
 
@@ -234,6 +284,65 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
         print("Run test.py to calibrate EER thresholds for single-pair decisions.")
     print(f"=====================================")
 
+    # --- Per-token forced alignment + scores (VFA heads) ---
+    token_rows = None
+    if getattr(model, "use_vfa", False):
+        header = "Per-token alignment (GRID: per-phoneme):" if dataset == "grid" \
+            else "Per-token alignment:"
+        print(header)
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) if cap else 0
+        cap.release()
+        if not fps or fps != fps:   # 0 or NaN
+            fps = 25.0
+        with torch.no_grad():
+            frame_logits = align_out["vfa_frame_logits"][0, :true_video_len]
+            bound_probs = torch.sigmoid(align_out["vfa_bound_logits"][0, :true_video_len]).cpu().numpy()
+            labels = [0] + phones + [0]
+            fallback = true_video_len < len(labels)
+            if fallback:
+                spans = uniform_token_spans(true_video_len, len(phones))
+            else:
+                f2l = viterbi_align(frame_logits, labels, bound_probs,
+                                    boundary_threshold=cfg.vfa_boundary_threshold)
+                spans = token_spans(f2l, labels)
+            posteriors = torch.softmax(frame_logits, dim=-1).cpu()
+            posterior_scores = []
+            for pos, s, e in spans:
+                cls = phones[pos]
+                posterior_scores.append(posteriors[s:e, cls].mean().item())
+            onehot = spans_to_onehot(spans, true_video_len, len(phones)).unsqueeze(0).to(device)
+            logits, mask = model.score_word_spans(
+                align_out["lip_feats"][:, :true_video_len],
+                align_out["text_feats"], onehot)
+            verif_scores = torch.sigmoid(logits)[0].cpu().tolist()
+            # map scores back onto token positions (spans may skip tokens)
+            post_by_pos = {pos: v for (pos, _, _), v in zip(spans, posterior_scores)}
+            ws_by_pos = {pos: v for (pos, _, _), v in zip(spans, verif_scores)}
+            ver_by_pos = {pos: v for (pos, _, _), v in zip(spans, verif_scores)}
+            n_tokens = len(token_names)
+            token_rows = build_token_report(
+                token_names, spans, 1.0 / fps,
+                [post_by_pos.get(i) for i in range(n_tokens)],
+                [ws_by_pos.get(i) for i in range(n_tokens)],
+                [ver_by_pos.get(i) for i in range(n_tokens)],
+                calib if calib is not None else {}, fallback)
+        for row in token_rows:
+            print(f"  {row['token']:>6}  [{row['start_s']}s - {row['end_s']}s]  "
+                  f"align={row['alignment_score']}  verif={row['verification_score']}  "
+                  f"{row['verdict']}{'' if not row['low_confidence'] else '  (low confidence)'}")
+    else:
+        print("Per-token timestamps/scores unavailable (checkpoint has no VFA heads).")
+
+    result = {
+        "global": {"verification_score": prob, "alignment_score": align_prob},
+        "tokens": token_rows,
+    }
+    if json_path:
+        with open(json_path, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"Wrote {json_path}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Lip-to-Text Inference Verification")
     parser.add_argument("--video", type=str, required=True, help="Path to raw video file; the lip region is cropped automatically (MediaPipe)")
@@ -241,6 +350,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default=None, help="Optional checkpoint model path; if omitted, uses latest from config output_dir")
     parser.add_argument("--dataset", type=str, default=None, choices=["grid", "digit"], help="Optional dataset override; defaults to config dataset")
     parser.add_argument("--thresholds", type=str, default=None, help="Optional eer_thresholds.json path; if omitted, auto-discovered next to the checkpoint")
+    parser.add_argument("--json", type=str, default=None, help="Optional output path for the JSON report (global scores plus per-token timestamps/scores)")
 
     args = parser.parse_args()
-    run_inference(args.video, args.text, args.model, args.dataset, args.thresholds)
+    run_inference(args.video, args.text, args.model, args.dataset, args.thresholds,
+                  json_path=args.json)

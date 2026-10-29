@@ -143,12 +143,14 @@ def test_training_gradient_survives_sigmoid_saturation():
 def test_vfa_frame_ce_ignores_unsupervised_frames():
     logits = torch.zeros(1, 3, 5)
     logits[0, 0, 2] = 5.0; logits[0, 1, 2] = 5.0; logits[0, 2, 4] = 5.0
-    ids = torch.tensor([[2, 2, 4]])
+    # Frame 2 is unsupervised and confidently wrong (argmax 4 vs id 2), so an
+    # implementation that ignores frame_valid gets ~1.69 instead of ~0.0266.
+    ids = torch.tensor([[2, 2, 2]])
     valid = torch.tensor([[True, True, False]])
     loss = vfa_frame_ce_loss(logits, ids, valid)
-    # Both supervised frames are argmax-correct (target column has the only
-    # 5.0), so the loss is the small residual softmax mass on the zero logits,
-    # not exactly zero — and frame 2 (argmax 4 vs id 2) must contribute nothing.
+    # Supervised frames are argmax-correct (target column holds the only 5.0),
+    # so the loss is the small residual softmax mass on the zero logits, not
+    # exactly zero — and frame 2 must contribute nothing.
     expected = F.cross_entropy(logits[0, :2], ids[0, :2])
     assert torch.allclose(loss, expected), f"{loss.item()} vs {expected.item()}"
     assert loss.item() < 0.05
@@ -166,8 +168,11 @@ def test_vfa_boundary_loss_masks_frames():
     bound_logits = torch.tensor([[5.0, 5.0, -5.0]])
     targets = torch.tensor([[0.0, 1.0, 1.0]])
     valid = torch.tensor([[True, True, False]])
-    # frames 0,1 supervised; frame 2 (wrong, would cost a lot) ignored
+    # frames 0,1 supervised; frame 2 is wrong (cost ~5.0) and must not pull
+    # the mean — the loss must equal BCE over the supervised frames only.
     loss = vfa_boundary_loss(bound_logits, targets, valid)
+    expected = F.binary_cross_entropy_with_logits(bound_logits[0, :2], targets[0, :2])
+    assert torch.allclose(loss, expected), f"{loss.item()} vs {expected.item()}"
     assert torch.isfinite(loss)
 
 

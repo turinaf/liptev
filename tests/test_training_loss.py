@@ -19,11 +19,18 @@ import os
 import sys
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.verification_model import LipTextVerificationModel
-from training.train import train_one_epoch
+from training.train import (
+    train_one_epoch,
+    vfa_frame_ce_loss,
+    vfa_boundary_loss,
+    word_verification_loss,
+)
+from utils.alignment import frame_token_targets
 
 
 def _tiny_model(vocab_size=13):
@@ -127,3 +134,58 @@ def test_training_gradient_survives_sigmoid_saturation():
     assert torch.isfinite(grad).all(), "saturated logits must not blow up gradients"
     assert grad.abs().sum().item() > 1e-6, \
         "BCE gradient is dead on saturated samples — use BCEWithLogitsLoss on the raw logit"
+
+
+# --- Task 7: VFA training losses -------------------------------------------
+# The three VFA losses are module-level free functions so they can be
+# verified numerically without a model or dataloader.
+
+def test_vfa_frame_ce_ignores_unsupervised_frames():
+    logits = torch.zeros(1, 3, 5)
+    logits[0, 0, 2] = 5.0; logits[0, 1, 2] = 5.0; logits[0, 2, 4] = 5.0
+    ids = torch.tensor([[2, 2, 4]])
+    valid = torch.tensor([[True, True, False]])
+    loss = vfa_frame_ce_loss(logits, ids, valid)
+    # Both supervised frames are argmax-correct (target column has the only
+    # 5.0), so the loss is the small residual softmax mass on the zero logits,
+    # not exactly zero — and frame 2 (argmax 4 vs id 2) must contribute nothing.
+    expected = F.cross_entropy(logits[0, :2], ids[0, :2])
+    assert torch.allclose(loss, expected), f"{loss.item()} vs {expected.item()}"
+    assert loss.item() < 0.05
+
+
+def test_vfa_frame_ce_penalizes_wrong_frame():
+    logits = torch.zeros(1, 1, 5)
+    logits[0, 0, 1] = 5.0       # argmax 1, target 2
+    ids = torch.tensor([[2]])
+    valid = torch.tensor([[True]])
+    assert vfa_frame_ce_loss(logits, ids, valid).item() > 0
+
+
+def test_vfa_boundary_loss_masks_frames():
+    bound_logits = torch.tensor([[5.0, 5.0, -5.0]])
+    targets = torch.tensor([[0.0, 1.0, 1.0]])
+    valid = torch.tensor([[True, True, False]])
+    # frames 0,1 supervised; frame 2 (wrong, would cost a lot) ignored
+    loss = vfa_boundary_loss(bound_logits, targets, valid)
+    assert torch.isfinite(loss)
+
+
+def test_word_verification_loss_only_on_valid_tokens():
+    logits = torch.tensor([[5.0, -5.0, 5.0]])   # token 1 wrong
+    labels = torch.tensor([[1.0, 1.0, 1.0]])
+    valid = torch.tensor([[True, True, False]])
+    loss = word_verification_loss(logits, labels, valid)
+    # only tokens 0 (correct) and 1 (wrong) count — each contributes
+    # softplus(-logit * label): token 0 correct at +5, token 1 wrong at -5.
+    expected = 0.5 * (F.softplus(torch.tensor(-5.0)) + F.softplus(torch.tensor(5.0)))
+    assert torch.allclose(loss, expected)
+
+
+def test_losses_zero_when_nothing_valid():
+    assert vfa_frame_ce_loss(torch.zeros(1, 2, 3), torch.zeros(1, 2).long(),
+                             torch.zeros(1, 2, dtype=torch.bool)).item() == 0.0
+    assert vfa_boundary_loss(torch.zeros(1, 2), torch.zeros(1, 2),
+                             torch.zeros(1, 2, dtype=torch.bool)).item() == 0.0
+    assert word_verification_loss(torch.zeros(1, 2), torch.zeros(1, 2),
+                                  torch.zeros(1, 2, dtype=torch.bool)).item() == 0.0

@@ -83,7 +83,10 @@ def main():
             train_sampler.set_epoch(epoch)
             train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None,
                                          lambda_ctc=config.lambda_ctc, lambda_align=config.lambda_align,
-                                         alignment_temperature=config.alignment_temperature)
+                                         alignment_temperature=config.alignment_temperature,
+                                         lambda_frame_ce=config.lambda_frame_ce,
+                                         lambda_boundary=config.lambda_boundary,
+                                         lambda_word_verif=config.lambda_word_verif)
             
             metrics = evaluate_model(model, val_loader, device)
             
@@ -107,6 +110,7 @@ def main():
                     model.module.state_dict(),
                     os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"),
                     config.alignment_mode,
+                    vfa_heads=True,
                 )
     finally:
         if writer is not None:

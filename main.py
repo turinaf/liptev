@@ -58,6 +58,13 @@ def main(config_path="config.json"):
         else:
             train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
             val_dataset = GRIDDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
+
+        for split_name, ds in (("train", train_dataset), ("val", val_dataset)):
+            if len(ds) == 0:
+                raise RuntimeError(
+                    f"{config.dataset} '{split_name}' split is empty in '{config.processed_data_dir}'. "
+                    f"Check the processed data dir in '{config_path}' or run pipeline/data_preparation.py."
+                )
         
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
         val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank, shuffle=False)

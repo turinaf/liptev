@@ -11,13 +11,21 @@
 
 # Submit with overrides, e.g. (from the repo root):
 #   mkdir -p logs && sbatch scripts/slurm/train.sbatch
-#   sbatch --gres=gpu:2 --export=DATASET=digit,NGPUS=2 scripts/slurm/train.sbatch
+#   sbatch --gres=gpu:2 scripts/slurm/train.sbatch
+#   sbatch --gres=gpu:2 --export=ALL,DATASET=digit scripts/slurm/train.sbatch
 
 set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 DATASET="${DATASET:-grid}"                 # grid or digit -> config.$DATASET.json
-NGPUS="${NGPUS:-1}"                        # must match --gres=gpu:N
+# One process per allocated GPU (from --gres=gpu:N) unless NGPUS is set explicitly
+if [ -z "${NGPUS:-}" ]; then
+    if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+        NGPUS=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -c .)
+    else
+        NGPUS="${SLURM_GPUS_ON_NODE:-1}"
+    fi
+fi
 PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
 PYENV_VERSION="${PYENV_VERSION:-3.14.8}"   # pyenv version with torch, mediapipe, g2p_en, tqdm
 

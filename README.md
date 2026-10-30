@@ -34,8 +34,8 @@ Config files: `config.grid.json` / `config.digit.json` (checkpoints and logs go 
 ```bash
 mkdir -p logs
 sbatch scripts/slurm/train.sbatch                       # grid, 1 GPU
-sbatch --gres=gpu:2 --export=NGPUS=2 scripts/slurm/train.sbatch
-sbatch --export=DATASET=digit scripts/slurm/train.sbatch
+sbatch --gres=gpu:2 scripts/slurm/train.sbatch          # grid, 2 GPUs (DDP, one process per GPU)
+sbatch --export=ALL,DATASET=digit scripts/slurm/train.sbatch
 ```
 
 ### Evaluation

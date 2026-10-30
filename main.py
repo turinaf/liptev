@@ -1,4 +1,5 @@
 import torch
+import multiprocessing
 import os
 import json
 import torch.nn as nn
@@ -29,6 +30,10 @@ def cleanup():
 def main(config_path="config.json"):
     writer = None
     try:
+        # Python 3.14 switched the POSIX default start method to 'forkserver',
+        # which pickles DataLoader worker args; collate_fn_factory returns a
+        # closure that can't be pickled. Restore the pre-3.14 'fork' behavior.
+        multiprocessing.set_start_method("fork", force=True)
         # Detect if spawned via torchrun
         if "LOCAL_RANK" in os.environ:
             local_rank = int(os.environ["LOCAL_RANK"])

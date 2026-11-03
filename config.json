@@ -1,5 +1,6 @@
 {
     "dataset": "grid",
+    "token_level": "word",
     "digit_raw_data_dir": "../digit_data",
     "digit_processed_data_dir": "./data/digit",
     "grid_raw_data_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/grid-data",
@@ -12,8 +13,12 @@
     "mp_model_path": "face_landmarker.task",
     "batch_size": 24,
     "learning_rate": 0.0001,
+    "weight_decay": 0.01,
+    "dropout": 0.2,
+    "early_stopping_patience": 5,
+    "validation_seed": 42,
     "lip_backbone_pretrained": true,
-    "epochs": 100,
+    "epochs": 30,
     "lambda_ctc": 1.0,
     "lambda_align": 1.0,
     "alignment_temperature": 1.0,
@@ -22,5 +27,5 @@
     "lambda_boundary": 1.0,
     "lambda_word_verif": 1.0,
     "vfa_boundary_threshold": 0.8,
-    "output_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/liptev-exp/grid"
+    "output_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/liptev-exp/grid-word"
 }

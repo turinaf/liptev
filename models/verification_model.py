@@ -9,7 +9,7 @@ from .vfa_heads import VFAHeads, WordVerificationHead, pool_tokens
 
 class LipTextVerificationModel(nn.Module):
     def __init__(self, vocab_size=50, feature_dim=256, lip_backbone_pretrained=True,
-                 alignment_mode="sim", use_vfa=True):
+                 alignment_mode="sim", use_vfa=True, dropout=0.0):
         super(LipTextVerificationModel, self).__init__()
         self.vocab_size = vocab_size
         self.lip_encoder = LipEncoder(feature_dim, backbone_pretrained=lip_backbone_pretrained)
@@ -36,6 +36,7 @@ class LipTextVerificationModel(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 1)
         )
+        self.feature_dropout = nn.Dropout(dropout)
 
         # VFA heads are optional so checkpoints trained before them keep
         # strict-loading (use_vfa=False omits the parameters entirely).
@@ -87,8 +88,8 @@ class LipTextVerificationModel(nn.Module):
 
     def forward(self, video_frames, phoneme_seqs, audio_features=None, video_padding_mask=None,
                 phoneme_padding_mask=None, audio_padding_mask=None, word_spans=None):
-        lip_feats = self.lip_encoder(video_frames, padding_mask=video_padding_mask)
-        text_feats = self.text_encoder(phoneme_seqs, padding_mask=phoneme_padding_mask)
+        lip_feats = self.feature_dropout(self.lip_encoder(video_frames, padding_mask=video_padding_mask))
+        text_feats = self.feature_dropout(self.text_encoder(phoneme_seqs, padding_mask=phoneme_padding_mask))
 
         ctc_nll_per_token, ctc_valid = self._ctc_terms(
             lip_feats, phoneme_seqs, video_padding_mask, phoneme_padding_mask

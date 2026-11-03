@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 
 def evaluate_model(model, dataloader, device):
     model.eval()
@@ -42,6 +43,13 @@ def evaluate_model(model, dataloader, device):
     all_scores = torch.cat(all_scores)
     all_aligns = torch.cat(all_aligns)
     all_labels = torch.cat(all_labels)
+    if dist.is_available() and dist.is_initialized():
+        local = (all_scores.cpu(), all_aligns.cpu(), all_labels.cpu())
+        gathered = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, local)
+        all_scores = torch.cat([part[0] for part in gathered])
+        all_aligns = torch.cat([part[1] for part in gathered])
+        all_labels = torch.cat([part[2] for part in gathered])
     
     from evaluation.metrics import compute_metrics
     metrics = compute_metrics(all_labels, all_scores, all_aligns)

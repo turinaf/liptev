@@ -1,9 +1,39 @@
 from tqdm import tqdm
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.alignment import frame_token_targets
+
+class ValidationMonitor:
+    """Track best validation EER; patience=0 disables early stopping."""
+    def __init__(self, patience=0):
+        self.patience = patience
+        self.best_eer = float("inf")
+        self.bad_epochs = 0
+
+    def update(self, eer):
+        if not math.isfinite(eer):
+            raise ValueError(f"Validation EER is not finite: {eer}")
+        improved = eer < self.best_eer
+        if improved:
+            self.best_eer = eer
+            self.bad_epochs = 0
+        else:
+            self.bad_epochs += 1
+        return improved
+
+    @property
+    def should_stop(self):
+        return self.patience > 0 and self.bad_epochs >= self.patience
+
+
+def build_optimizer(model, learning_rate, weight_decay=0.0):
+    if weight_decay > 0:
+        return torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    return torch.optim.Adam(model.parameters(), lr=learning_rate)
+
 
 def alignment_kl_loss(sim_matrix, alignment_targets, frame_valid, temperature=1.0):
     """Frame->token CE against boundary targets.

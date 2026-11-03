@@ -28,7 +28,7 @@ flowchart TD
 
     subgraph ONLINE["Online Batching (utils/dataset_utils.py collate_fn)"]
         DS["Dataset Loader<br/>GRIDDataset / DigitDataset"]
-        G2P["PhonemeConverter<br/>g2p_en → ARPABET ids"]
+        G2P["TranscriptTokenizer<br/>GRID words / digits<br/>legacy: ARPABET ids"]
         NS["NegativeSampler<br/>5 hard-negative strategies"]
         BATCH["Batch: pos + neg pairs,<br/>padding masks, alignment targets"]
         DS --> BATCH
@@ -142,7 +142,7 @@ After processing all speakers, all processed videos are globbed, shuffled with `
 | | `GRIDDataset` | `DigitDataset` |
 |---|---|---|
 | Frame budget | `max_frames = 75` (3 s @ 25 fps) | `max_frames = 125` (p95 clip length) |
-| Transcript tokens | ARPABET phonemes (vocab 41 = 39 phonemes + `<pad>` + `<unk>`) | Digits `0–9`, `!`, `<pad>`, `<unk>` (vocab 13) |
+| Transcript tokens | Words (vocab 53 = 51 GRID words + `<pad>` + `<unk>`); legacy phoneme mode: 41 | Digits `0–9`, `!`, `<pad>`, `<unk>` (vocab 13) |
 | Boundary source | `.align` word times | `.lab` digit times |
 | Timebase fix | Proportional calibration: `frame = value · video_len / max_end` (raw values are ~25 kHz sample units) | `seconds_to_frame(s, source_fps)` using `meta.json`, fallback inference `frames/duration`, then config default |
 
@@ -162,21 +162,21 @@ Both loaders:
 flowchart TB
     ITEM["Dataset item<br/>(video, transcript, word_times)"]
     subgraph POS["Positive pair (label = 1)"]
-        PV["Same video"] --- PT["True transcript<br/>→ phoneme ids (g2p_en)<br/>→ token_times [(ids, fs, fe)]"]
+        PV["Same video"] --- PT["True transcript<br/>→ word/digit ids<br/>→ token_times [(ids, fs, fe)]"]
     end
     subgraph NEG["Negative pair (label = 0)"]
         NV["Same video"] --- NT["Corrupted transcript<br/>(NegativeSampler)"]
     end
     ITEM --> POS & NEG
-    PT --> PAD["pad_sequence → phoneme batch<br/>mask = ids == pad"]
+    PT --> PAD["pad_sequence → token batch<br/>mask = ids == pad"]
     NT --> PAD
     PV & NV --> VMASK["video_padding_mask<br/>position >= video_len"]
     AU["Audio stack + zero-pad<br/>audio_padding_mask"] 
-    PT --> AT["expand_token_ranges:<br/>word frame range split uniformly<br/>across its phonemes<br/>→ one-hot targets B×T×L<br/>+ speech_mask + has_align_target"]
+    PT --> AT["expand_token_ranges:<br/>one word per frame range<br/>(legacy: split across phonemes)<br/>→ one-hot targets B×T×L<br/>+ speech_mask + has_align_target"]
     PT --> WT["word_spans B×T×L one-hot +<br/>word_labels B×L + word_label_mask:<br/>positives all-1; substitution negatives<br/>keep 1s except the swapped token = 0"]
 ```
 
-**Text → phonemes** (`utils/phoneme_converter.py`): lowercases/strips punctuation, runs `g2p_en` (CMU dict + neural fallback), removes stress digits, maps to a fixed 39-phoneme ARPABET vocabulary. Crucially, `text_to_phoneme_indices_per_word` keeps **per-word phoneme groups** so word-level boundary times can be distributed across each word's phonemes — the same indices feed both the text encoder and the alignment target axis.
+**Text → tokens** (`utils/tokenizer.py`): GRID word mode lowercases/strips punctuation and maps each word to a fixed ID from the 51-word GRID grammar (`<pad>=0`, `<unk>=1`, remaining words sorted). Out-of-vocabulary words raise an error. Each word retains its full `.align` frame range: no artificial phoneme splitting. The same IDs feed the text encoder, CTC and frame posterior head. Legacy phoneme mode uses `PhonemeConverter` and uniformly distributes a word's range across its phonemes. The batch keys `phonemes` and `phoneme_padding_mask` retain their historical names but carry word IDs in word mode.
 
 **Negative sampling** (`utils/negative_sampler.py`) picks one of five strategies at random:
 
@@ -189,7 +189,7 @@ flowchart TB
 
 A global guard guarantees the negative ≠ positive (e.g., shuffling `"7 7 7 7"` would otherwise produce a mislabeled pair). Negatives get empty `token_times` — a mismatched transcript has no valid alignment supervision.
 
-**Per-token verification supervision** — alongside `alignment_targets`, the collate emits three tensors for the VFA word-verification head (§4.7): `word_spans` (`B×T×L` one-hot, mirroring `alignment_targets` but also built for *single-substitution* negatives, whose frames still articulate every token except the swap), `word_labels` (`B×L`, 1 on true tokens, 0 on the swapped token) and `word_label_mask` (which positions carry supervision). For digits the swap replaces the frame range's token id at the substituted position; for GRID the swapped word keeps its frame range and only its phoneme ids/labels are replaced (skipped when the word's phoneme count differs). Non-substitution negatives carry no per-token supervision.
+**Per-token verification supervision** — alongside `alignment_targets`, the collate emits three tensors for the VFA word-verification head (§4.7): `word_spans` (`B×T×L` one-hot, also built for single-substitution negatives), `word_labels` (`B×L`, 1 on true tokens, 0 on the substituted word/digit) and `word_label_mask`. A substitution keeps the original word's complete frame range but replaces its token ID and label. Non-substitution negatives carry no per-token supervision.
 
 ---
 
@@ -250,7 +250,7 @@ flowchart TB
     AF & TF --> AT2
     LF & AF --> LA
 
-    CTCH["CTC head: Linear 256→V+1<br/>log_softmax over frames<br/>CTC NLL vs phoneme targets<br/>(blank = index V)"]
+    CTCH["CTC head: Linear 256→V+1<br/>log_softmax over frames<br/>CTC NLL vs word/digit targets<br/>(blank = index V)"]
     LF --> CTCH
 
     POOL["masked_mean pooling<br/>lip_pool · text_pool · audio_pool"]
@@ -279,9 +279,9 @@ flowchart TB
 
 Output: contextual lip features `B × T × 256`.
 
-### 4.2 Text Encoder — phoneme stream
+### 4.2 Text Encoder — word/digit stream
 
-Token embeddings (vocab → 256) + sinusoidal positional encoding → the same 2-layer transformer architecture. Output: `B × L × 256`. Using phonemes rather than words makes the representation pronunciation-oriented, which matches what lips actually articulate.
+Token embeddings (vocab → 256) + sinusoidal positional encoding → the same 2-layer transformer architecture. Output: `B × L × 256`. GRID uses one embedding per word; legacy checkpoints use phoneme embeddings. Configured feature dropout is applied to lip/text encoder outputs during training only.
 
 ### 4.3 Audio Encoder — acoustic stream
 
@@ -293,14 +293,14 @@ Each `CrossModalAlignment` instance scores how well two modalities correspond:
 
 1. **Cosine similarity matrix** — L2-normalized features multiplied to a `B × T × L` grid; padded rows/columns filled with `-1e9`.
 2. **Multi-head cross attention** — query = one modality, key/value = the other, producing aligned features and attention weights (returned for inspection).
-3. **Word-level score** — for each token, take the **max similarity over all frames** ("does this phoneme appear clearly at some point?"), then average over valid tokens.
+3. **Word-level score** — for each token, take the **max similarity over all frames** ("does this word/digit appear clearly at some point?"), then average over valid tokens.
 4. **Score mapping** — the mean max-cosine in `[-1, 1]` is mapped to `[0, 1]` via `(x + 1) / 2`.
 
 Three instances score **lip↔text**, **audio↔text**, and **lip↔audio**; their weighted combination (0.4 / 0.4 / 0.2) forms the overall alignment score used by the contrastive loss.
 
 ### 4.5 CTC Head — boundary-aware likelihood feature
 
-A linear head maps every lip frame to `vocab_size + 1` logits (extra class = CTC blank). `F.ctc_loss` (reduction `'none'`, `zero_infinity=True`) computes, per sample, the negative log-likelihood that the lip sequence *transcribes* to the paired phoneme sequence, normalized per target token to stay bounded (~[-10, 0]) regardless of length. Two roles:
+A linear head maps every lip frame to `vocab_size + 1` logits (extra class = CTC blank). `F.ctc_loss` (reduction `'none'`, `zero_infinity=True`) computes, per sample, the negative log-likelihood that the lip sequence *transcribes* to the paired word/digit sequence (phonemes for legacy models), normalized per target token. Two roles:
 
 - **Training loss** — applied to positive pairs only (negatives have mismatched transcripts; forcing alignment there would contradict the verification objective).
 - **Classifier feature** — `-ctc_nll` (a per-token log-likelihood) is appended to the classifier input, making the final decision explicitly alignment-aware: a video can't score high unless its mouth movements could plausibly produce the claimed text.
@@ -359,13 +359,13 @@ flowchart LR
 
 - **BCE** trains the sigmoid classifier directly against the pair label.
 - **Contrastive margin** shapes the alignment score itself: positives pulled toward 1; negatives pushed below an implicit 0.5 margin (no gradient once below it).
-- **CTC** teaches the lip encoder frame-level articulation structure (which frames produce which phonemes).
-- **Frame-level alignment CE** (`alignment_kl_loss`) supervises the cosine similarity matrix against the one-hot `alignment_targets` built from `.align`/`.lab` boundaries — each speech frame must attend to exactly its current phoneme. Per-sample means are averaged only over samples with targets, so partial boundary coverage doesn't bias the loss.
+- **CTC** teaches the lip encoder ordered word/digit articulation.
+- **Frame-level alignment CE** (`alignment_kl_loss`) supervises the cosine similarity matrix against the one-hot `alignment_targets` built from `.align`/`.lab` boundaries — each speech frame must attend to its current word/digit. Per-sample means are averaged only over samples with targets, so partial boundary coverage doesn't bias the loss.
 - **VFA frame CE** (`vfa_frame_ce_loss`, weight `lambda_frame_ce`) trains the frame head's per-frame token logits (`ignore_index` on padded frames).
 - **VFA boundary BCE** (`vfa_boundary_loss`, weight `lambda_boundary`) trains the boundary head on token-to-token handovers.
 - **VFA word verification BCE** (`word_verification_loss`, weight `lambda_word_verif`) trains the per-token head on positives (all tokens label 1) and single-substitution negatives (swapped token label 0), active only where `word_label_mask & word_token_mask`. All three run only when the checkpoint was built with `vfa_heads=true` and the batch carries the supervision tensors.
 
-**Orchestration** (`main.py`): DDP over all visible GPUs (torchrun or auto-spawn), Adam (lr 1e-4), per-epoch validation computing **ROC AUC, EER, verification accuracy** (`evaluation/`), TensorBoard scalars, and per-epoch checkpoints.
+**Orchestration** (`main.py`): DDP over all visible GPUs (torchrun or auto-spawn), AdamW when weight decay is enabled (otherwise legacy Adam), per-epoch validation computing **ROC AUC, EER, verification accuracy**, TensorBoard scalars, per-epoch checkpoints and a best-validation-EER checkpoint. Validation negatives are repeatable; metrics gather all ranks so checkpoint selection and early stopping agree across ranks. GRID configs cap training at 30 epochs with weight decay 0.01, feature dropout 0.2 and patience 5. Checkpoints stamp dataset, token level, exact vocabulary and dropout as well as alignment mode and VFA-head presence. Word models use a separate `grid-word` experiment directory.
 
 ---
 
@@ -379,9 +379,9 @@ flowchart LR
 | GRID loader | `dataset/grid_loader.py` | manifest → tensors | `.align` parsing + proportional timebase calibration |
 | Digit loader | `dataset/digit_loader.py` | manifest → tensors | `.lab` parsing + per-video source-fps resolution |
 | Pair builder | `utils/dataset_utils.py` | items → batch | Positive/negative pairing, masks, alignment targets |
-| Phoneme converter | `utils/phoneme_converter.py` | text → ARPABET ids | g2p_en, per-word grouping |
+| Transcript tokenizer | `utils/tokenizer.py` | text → word/digit IDs | Fixed GRID vocabulary; legacy phoneme converter supported |
 | Negative sampler | `utils/negative_sampler.py` | transcript → corrupted transcript | 5 hard-negative strategies |
-| Alignment targets | `utils/alignment.py` | word times → one-hot B×T×L | Uniform word→phoneme frame splitting |
+| Alignment targets | `utils/alignment.py` | word times → one-hot B×T×L | Whole-word spans; legacy mode splits across phonemes |
 | VFA heads | `models/vfa_heads.py` | lip_feats/text_feats + span one-hot → frame/boundary logits, per-token logit | Forced-alignment targets + per-token verification |
 | Viterbi aligner | `utils/viterbi.py` | frame logits + boundary probs → frame→token labels, per-occurrence spans | Monotonic decode, boundary-forced handovers, short-video fallback |
 | Lip encoder | `models/lip_encoder.py` | B×T×3×96×96 → B×T×256 | 3D conv + ResNet18 + transformer |

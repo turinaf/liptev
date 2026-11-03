@@ -11,12 +11,27 @@ lambda_align cannot act in the chosen mode.
 import torch
 
 
-def save_checkpoint(state_dict, path, alignment_mode, vfa_heads=True):
+def save_checkpoint(state_dict, path, alignment_mode, vfa_heads=True, *,
+                    dataset=None, token_level="phoneme", token_vocab=None, dropout=0.0):
     torch.save(
         {"model_state_dict": state_dict, "alignment_mode": alignment_mode,
-         "vfa_heads": vfa_heads},
+         "vfa_heads": vfa_heads, "dataset": dataset, "token_level": token_level,
+         "token_vocab": token_vocab, "dropout": dropout},
         path,
     )
+
+def checkpoint_tokenizer(checkpoint, dataset):
+    """Unstamped GRID checkpoints use the legacy phoneme vocabulary."""
+    from utils.tokenizer import TranscriptTokenizer
+    metadata = checkpoint if isinstance(checkpoint, dict) else {}
+    saved_dataset = metadata.get("dataset")
+    if saved_dataset is not None and saved_dataset != dataset:
+        raise ValueError(f"Checkpoint dataset '{saved_dataset}' does not match '{dataset}'")
+    tokenizer = TranscriptTokenizer(dataset, metadata.get("token_level", "phoneme"))
+    if dataset == "grid" and tokenizer.token_level == "word":
+        if metadata.get("token_vocab") != tokenizer.vocab:
+            raise ValueError("Word checkpoint vocabulary is missing or incompatible; retrain with the current vocabulary")
+    return tokenizer
 
 
 def resolve_vfa_heads(checkpoint):

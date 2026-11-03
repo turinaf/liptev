@@ -12,9 +12,8 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from dataset.preprocessing import extract_lip_frames
 from models.verification_model import LipTextVerificationModel
-from utils.phoneme_converter import PhonemeConverter
 from utils.dataset_utils import Config
-from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads
+from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads, checkpoint_tokenizer
 from utils.viterbi import viterbi_align, token_spans, uniform_token_spans
 from evaluation.metrics import load_eer_thresholds
 import argparse
@@ -94,6 +93,41 @@ def build_token_report(tokens, spans, seconds_per_frame, posterior_scores,
                      "verdict": verdict, "low_confidence": fallback})
     return rows
 
+def build_word_report(per_word, phoneme_rows):
+    """Group phoneme rows into words using the lowest constituent scores.
+
+    Missing or truncated phonemes make the whole word unavailable rather than
+    reporting a confident decision for only part of the word.
+    """
+    rows = []
+    offset = 0
+    for word, ids in per_word:
+        parts = phoneme_rows[offset:offset + len(ids)]
+        offset += len(ids)
+        row = {"token": word, "start_s": None, "end_s": None,
+               "alignment_score": None, "verification_score": None,
+               "verdict": "uncalibrated", "low_confidence": True}
+        if (not ids or len(parts) != len(ids)
+                or any(p["start_s"] is None or p["end_s"] is None for p in parts)):
+            rows.append(row)
+            continue
+        row["start_s"] = parts[0]["start_s"]
+        row["end_s"] = parts[-1]["end_s"]
+        for key in ("alignment_score", "verification_score"):
+            scores = [p[key] for p in parts]
+            if all(score is not None for score in scores):
+                row[key] = min(scores)
+        verdicts = [p["verdict"] for p in parts]
+        # Preserve decisions made before scores were rounded for display.
+        if row["verification_score"] is not None:
+            if "MISMATCH" in verdicts:
+                row["verdict"] = "MISMATCH"
+            elif all(verdict == "MATCH" for verdict in verdicts):
+                row["verdict"] = "MATCH"
+        row["low_confidence"] = any(p["low_confidence"] for p in parts)
+        rows.append(row)
+    return rows
+
 def spans_to_score_maps(spans, posterior_scores, verif_scores, word_scores=None):
     """Per-token score maps keyed by token position.
 
@@ -101,11 +135,11 @@ def spans_to_score_maps(spans, posterior_scores, verif_scores, word_scores=None)
     averaging over an empty frame range yields NaN, so their tokens take the
     missing-span path in build_token_report (nulls + low_confidence)."""
     post_by_pos, ws_by_pos, ver_by_pos = {}, {}, {}
-    for (pos, s, e), post, verif in zip(spans, posterior_scores, verif_scores):
+    for (pos, s, e), post in zip(spans, posterior_scores):
         if e <= s:
             continue
         post_by_pos[pos] = post
-        ver_by_pos[pos] = verif
+        ver_by_pos[pos] = verif_scores[pos]
         if word_scores is not None:
             ws_by_pos[pos] = word_scores[pos]
     return post_by_pos, ws_by_pos, ver_by_pos
@@ -224,8 +258,8 @@ def resolve_checkpoint_path(requested_model_path, config_output_dir):
 
 
 def run_inference(video_path, transcript, model_path=None, dataset=None, thresholds_path=None,
-                  json_path=None):
-    cfg = Config("config.json")
+                  json_path=None, config_path="config.json"):
+    cfg = Config(config_path)
     dataset = dataset or cfg.dataset
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -242,6 +276,7 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     transcript = parse_input_text(transcript, dataset)
     
     checkpoint = torch.load(resolved_model_path, map_location=device)
+    tokenizer = checkpoint_tokenizer(checkpoint, dataset)
     state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
 
     clean_state_dict = {}
@@ -255,37 +290,28 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     # calibration were produced under the checkpoint's scoring mode.
     alignment_mode = resolve_alignment_mode(checkpoint, cfg.alignment_mode)
 
-    vocab_size = 13 if dataset == "digit" else 41
+    vocab_size = len(tokenizer.vocab)
     # Needs to match architecture in main
     model = LipTextVerificationModel(
         vocab_size=vocab_size,
         feature_dim=256,
         lip_backbone_pretrained=cfg.lip_backbone_pretrained,
         alignment_mode=alignment_mode,
-        use_vfa=resolve_vfa_heads(checkpoint)
+        use_vfa=resolve_vfa_heads(checkpoint),
+        dropout=checkpoint.get("dropout", 0.0),
     ).to(device)
 
     model.load_state_dict(clean_state_dict)
     model.eval()
 
     print(f"Parsing transcript: '{transcript}'")
-    if dataset == "digit":
-        digit_vocab = {str(i): i+1 for i in range(10)}
-        digit_vocab["!"] = 11
-        digit_vocab["<pad>"] = 0
-        digit_vocab["<unk>"] = 12
-        phones = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in transcript.split()]
-        # Report rows are per-token: one row per digit.
-        token_names = transcript.split()
+    per_word = tokenizer.per_word(transcript)
+    phones = [idx for _, ids in per_word for idx in ids]
+    if dataset == "digit" or tokenizer.token_level == "word":
+        token_names = [word for word, _ in per_word]
     else:
-        converter = PhonemeConverter()
-        # Per-word phonemization — the same source the model is trained on
-        # (the legacy whole-sentence path emitted <unk> for every space).
-        per_word = converter.text_to_phoneme_indices_per_word(transcript)
-        phones = converter.flatten_per_word(per_word)
-        id_to_phoneme = {idx: ph for ph, idx in converter.vocab.items()}
-        # GRID rows are per-phoneme (spans are per-phoneme too).
-        token_names = [id_to_phoneme.get(idx, "<unk>") for _, ids in per_word for idx in ids]
+        id_to_phoneme = {idx: ph for ph, idx in tokenizer.vocab.items()}
+        token_names = [id_to_phoneme.get(idx, "<unk>") for idx in phones]
 
     if len(phones) == 0:
         phones = [0]
@@ -377,7 +403,7 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     # --- Per-token forced alignment + scores (VFA heads) ---
     token_rows = None
     if getattr(model, "use_vfa", False):
-        header = "Per-token alignment (GRID: per-phoneme):" if dataset == "grid" \
+        header = "Per-word alignment (GRID):" if dataset == "grid" \
             else "Per-token alignment:"
         print(header)
         cap = cv2.VideoCapture(video_path)
@@ -426,6 +452,8 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
                 [ws_by_pos.get(i) for i in range(n_tokens)],
                 [ver_by_pos.get(i) for i in range(n_tokens)],
                 calib if calib is not None else {}, fallback)
+            if dataset == "grid" and tokenizer.token_level == "phoneme":
+                token_rows = build_word_report(per_word, token_rows)
         for row in token_rows:
             print(f"  {row['token']:>6}  [{row['start_s']}s - {row['end_s']}s]  "
                   f"align={row['alignment_score']}  verif={row['verification_score']}  "
@@ -448,6 +476,7 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Lip-to-Text Inference Verification")
+    parser.add_argument("--config", type=str, default="config.json", help="Dataset and model configuration")
     parser.add_argument("--video", type=str, required=True, help="Path to raw video file; the lip region is cropped automatically (MediaPipe)")
     parser.add_argument("--text", type=str, required=True, help="Ground truth or hypothesized text")
     parser.add_argument("--model", type=str, default=None, help="Optional checkpoint model path; if omitted, uses latest from config output_dir")
@@ -457,4 +486,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     run_inference(args.video, args.text, args.model, args.dataset, args.thresholds,
-                  json_path=args.json)
+                  json_path=args.json, config_path=args.config)

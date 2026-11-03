@@ -6,16 +6,16 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-from torch.optim import Adam
 from dataset.grid_loader import GRIDDataset
 from dataset.digit_loader import DigitDataset
 from models.verification_model import LipTextVerificationModel
-from training.train import train_one_epoch
+from training.train import train_one_epoch, build_optimizer, ValidationMonitor
 from evaluation.evaluate import evaluate_model
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from utils.dataset_utils import Config, collate_fn_factory
 from utils.checkpoint import save_checkpoint, check_alignment_supervision
+from utils.tokenizer import TranscriptTokenizer
 
 
 
@@ -50,6 +50,8 @@ def main(config_path="config.json"):
             device = torch.device("cuda:0")
 
         config = Config(config_path)
+        rank = dist.get_rank()
+        torch.cuda.set_device(local_rank)
         check_alignment_supervision(config.alignment_mode, config.lambda_align)
 
         if config.dataset == "digit":
@@ -66,34 +68,42 @@ def main(config_path="config.json"):
                     f"Check the processed data dir in '{config_path}' or run pipeline/data_preparation.py."
                 )
         
-        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
-        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank, shuffle=False)
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
         
         transcript_pool = [s.get("transcript", "") for s in getattr(train_dataset, "samples", [])]
-        custom_collate = collate_fn_factory(config.dataset, transcript_pool=transcript_pool)
+        custom_collate = collate_fn_factory(
+            config.dataset, transcript_pool=transcript_pool, token_level=config.token_level)
+        val_collate = collate_fn_factory(
+            config.dataset,
+            transcript_pool=[s.get("transcript", "") for s in getattr(val_dataset, "samples", [])],
+            token_level=config.token_level, seed=config.validation_seed)
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=val_collate, num_workers=4, pin_memory=True)
         
-        if config.dataset == "digit":
-            vocab_size = 13  # 0-9, !, <pad>, <unk>
-        else:
-            vocab_size = 41  # PhonemeConverter.vocab_size (39+pad+unk)
+        tokenizer = TranscriptTokenizer(config.dataset, config.token_level)
+        vocab_size = len(tokenizer.vocab)
         model = LipTextVerificationModel(
             vocab_size=vocab_size,
             lip_backbone_pretrained=config.lip_backbone_pretrained,
-            alignment_mode=config.alignment_mode
+            alignment_mode=config.alignment_mode,
+            dropout=config.dropout,
         ).to(device)
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
         
-        optimizer = Adam(model.parameters(), lr=config.learning_rate)
+        optimizer = build_optimizer(model, config.learning_rate, config.weight_decay)
+        monitor = ValidationMonitor(config.early_stopping_patience)
         
-        if local_rank == 0:
+        if rank == 0:
             os.makedirs(config.output_dir, exist_ok=True)
             writer = SummaryWriter(log_dir=os.path.join(config.output_dir, 'logs'))
+            print(f"Training {config.dataset} with {config.token_level} tokens, "
+                  f"vocab_size={vocab_size}, dropout={config.dropout}, "
+                  f"weight_decay={config.weight_decay}, up to {config.epochs} epochs")
             
         for epoch in range(1, config.epochs + 1):
             train_sampler.set_epoch(epoch)
-            train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if local_rank == 0 else None,
+            train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer if rank == 0 else None,
                                          lambda_ctc=config.lambda_ctc, lambda_align=config.lambda_align,
                                          alignment_temperature=config.alignment_temperature,
                                          lambda_frame_ce=config.lambda_frame_ce,
@@ -101,8 +111,9 @@ def main(config_path="config.json"):
                                          lambda_word_verif=config.lambda_word_verif)
             
             metrics = evaluate_model(model, val_loader, device)
+            improved = monitor.update(metrics["verification_eer"])
             
-            if local_rank == 0:
+            if rank == 0:
                 print(
                     f"Epoch {epoch}/{config.epochs} | Train Loss: {train_loss:.4f} | "
                     f"Val ROC AUC: {metrics['roc_auc']:.4f} | "
@@ -123,7 +134,24 @@ def main(config_path="config.json"):
                     os.path.join(config.output_dir, f"checkpoint_ep{epoch}.pt"),
                     config.alignment_mode,
                     vfa_heads=True,
+                    dataset=config.dataset, token_level=config.token_level,
+                    token_vocab=tokenizer.vocab, dropout=config.dropout,
                 )
+                if improved:
+                    save_checkpoint(
+                        model.module.state_dict(),
+                        os.path.join(config.output_dir, "best_lip_verification_model.pth"),
+                        config.alignment_mode, vfa_heads=True,
+                        dataset=config.dataset, token_level=config.token_level,
+                        token_vocab=tokenizer.vocab, dropout=config.dropout,
+                    )
+                    print(f"Saved best checkpoint at epoch {epoch} (Val EER {monitor.best_eer:.4f})")
+            # evaluate_model gathers every rank, so all ranks make the same
+            # stop decision and exit DDP together.
+            if monitor.should_stop:
+                if rank == 0:
+                    print(f"Early stopping after {monitor.bad_epochs} epochs without Val EER improvement.")
+                break
     finally:
         if writer is not None:
             writer.close()

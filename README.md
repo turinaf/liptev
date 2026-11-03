@@ -4,12 +4,12 @@ Given a silent video of a speaker and a transcript, score how well the lip movem
 
 Two datasets are supported:
 
-- **GRID** (English): word transcripts phonemized with `g2p_en` (39 ARPABET phonemes), boundaries from `.align` files.
+- **GRID** (English): fixed vocabulary of 51 words plus `<pad>`/`<unk>`, with whole-word boundaries from `.align` files. Legacy phoneme checkpoints remain readable.
 - **Digit** (Chinese): digit sequences (0–9 plus `!` interjections), boundaries from `.lab` files.
 
 ## Model
 
-A 3D-conv + ResNet18 lip encoder and a phoneme/digit embedding + transformer text encoder feed a cross-modal alignment module (cosine similarity or cross-attention, see `alignment_mode`) and a classifier that emits the global verification score. A CTC head over lip frames adds an alignment-aware feature.
+A 3D-conv + ResNet18 lip encoder and a word/digit embedding + transformer text encoder feed a cross-modal alignment module (cosine similarity or cross-attention, see `alignment_mode`) and a classifier that emits the global verification score. A CTC head over lip frames adds an alignment-aware feature.
 
 On top of that, VFA-style heads provide per-token output: a per-frame token-posterior head and a boundary head drive a Viterbi forced aligner (port of the method from `Visual-Forced-Alignment`), giving each word/digit a time span. A per-token verification head, trained on positives and single-substitution negatives, scores whether each token is actually being articulated. Details and diagrams: `architecture.md`.
 
@@ -38,6 +38,12 @@ sbatch --gres=gpu:2 scripts/slurm/train.sbatch          # grid, 2 GPUs (DDP, one
 sbatch --export=ALL,DATASET=digit scripts/slurm/train.sbatch
 ```
 
+GRID configs (`config.json` and `config.grid.json`) use `token_level: "word"` throughout: one text-encoder ID per word, word CTC targets, whole-word frame/boundary targets, and word verification labels. The vocabulary is deterministic and shared with negative sampling (GRID letters exclude `w`; adverbs are `again`, `now`, `please`, `soon`). Out-of-vocabulary GRID words raise an error instead of silently training unknown tokens.
+
+GRID trains for **at most 30 epochs**, with AdamW weight decay `0.01` and feature dropout `0.2` on lip/text encoder outputs (disabled at evaluation). Validation negatives use a private fixed seed (`validation_seed: 42`). The lowest validation verification EER selects `best_lip_verification_model.pth`; `early_stopping_patience: 5` stops after five consecutive epochs without improvement (`0` disables stopping). DDP gathers validation scores across ranks before best-model selection/stopping. These controls reduce overfitting risk but do not establish that the dataset is overfitting; compare train loss and validation EER over epochs.
+
+Word models start fresh and write to `liptev-exp/grid-word`, separate from phoneme experiments. Do not resume a phoneme checkpoint as a word model. Checkpoints record the dataset, token level, exact vocabulary and dropout; evaluation/inference use checkpoint tokenization rather than the current config. Digit configs keep their existing tokenization, optimizer and epoch settings. The existing clip-random splits are unchanged; speaker-held-out splits are needed if the goal is unseen-speaker generalization.
+
 ### Evaluation
 
 ```bash
@@ -49,9 +55,11 @@ Reports AUC / accuracy / EER on the hold-out set and writes `eer_thresholds.json
 ### Inference
 
 ```bash
-python inference.py --video clip.mp4 --text "bin blue at f two now" --dataset grid
-python inference.py --video clip.mp4 --text "1 2 3" --dataset digit --json report.json
+python inference.py --config config.grid.json --video clip.mp4 --text "bin blue at f two now"
+python inference.py --config config.digit.json --video clip.mp4 --text "1 2 3" --json report.json
 ```
+
+Evaluation and inference prefer the best checkpoint, then the latest epoch if no best checkpoint exists. Run evaluation again after word training to create fresh EER thresholds; never reuse phoneme-model calibration.
 
 Prints global verification and alignment scores with decisions at the EER-optimal thresholds, plus a per-token table (timestamps, alignment score, verification score). With `--json`:
 
@@ -67,7 +75,9 @@ Prints global verification and alignment scores with decisions at the EER-optima
 }
 ```
 
-Per-token `alignment_score` is non-semantic (frame posterior averaged with the cross-modal word score); `verification_score` is semantic (word-head sigmoid). GRID rows are per-phoneme, digit rows per-digit. Checkpoints trained before the VFA heads load with the per-token output disabled (`"tokens": null`).
+GRID console and JSON rows are **per-word**; digit rows remain per-digit. Word-trained checkpoints align and verify each word directly: `alignment_score` combines the word's frame posterior and cross-modal score; `verification_score` is the word-head sigmoid over the whole-word span. Existing decisions use the global verification EER threshold, not a separately calibrated per-word threshold.
+
+For legacy phoneme checkpoints (no token-level stamp), inference still groups phoneme rows into words: timestamps span first to last phoneme, scores are the lowest constituent scores, and any phoneme MISMATCH makes the word MISMATCH. Missing/truncated phonemes make the whole legacy word unavailable. Missing word spans also produce null timestamps/scores and `low_confidence: true`; uniform-alignment fallbacks carry `low_confidence: true`. Checkpoints trained before the VFA heads load with per-token output disabled (`"tokens": null`).
 
 ## Training data
 

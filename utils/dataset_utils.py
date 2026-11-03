@@ -1,7 +1,8 @@
 import os
 import json
+import random
 import torch
-from utils.phoneme_converter import PhonemeConverter
+from utils.tokenizer import TranscriptTokenizer
 from utils.negative_sampler import NegativeSampler
 from utils.alignment import expand_token_ranges, build_alignment_targets
 
@@ -19,6 +20,17 @@ class Config:
         self.batch_size = cfg.get("batch_size", 32)
         self.learning_rate = cfg.get("learning_rate", 0.0001)
         self.epochs = cfg.get("epochs", 100)
+        self.token_level = cfg.get("token_level", "phoneme")
+        self.weight_decay = cfg.get("weight_decay", 0.0)
+        self.dropout = cfg.get("dropout", 0.0)
+        self.early_stopping_patience = cfg.get("early_stopping_patience", 0)
+        self.validation_seed = cfg.get("validation_seed", 42)
+        if self.token_level not in ("phoneme", "word"):
+            raise ValueError("token_level must be 'phoneme' or 'word'")
+        if self.weight_decay < 0 or not 0 <= self.dropout < 1:
+            raise ValueError("weight_decay must be nonnegative and dropout must be in [0, 1)")
+        if self.early_stopping_patience < 0:
+            raise ValueError("early_stopping_patience must be nonnegative")
         # Frame budgets: GRID clips are 3 s @ 25 fps; digit clips are longer
         # (p95 = 112 frames at ~30 fps source rate).
         if self.dataset == "digit":
@@ -57,18 +69,17 @@ def substitution_position(pos_words, neg_words):
     return diffs[0] if len(diffs) == 1 else None
 
 
-def collate_fn_factory(dataset_name, transcript_pool=None):
-    converter = PhonemeConverter() if dataset_name != "digit" else None
+def collate_fn_factory(dataset_name, transcript_pool=None, token_level="phoneme", seed=None):
+    tokenizer = TranscriptTokenizer(dataset_name, token_level)
     global_sampler = NegativeSampler(transcript_pool or [], dataset_name=dataset_name)
-
-    digit_vocab = {str(i): i+1 for i in range(10)}
-    digit_vocab["!"] = 11
-    digit_vocab["<pad>"] = 0
-    digit_vocab["<unk>"] = 12
 
     def collate_fn(batch):
         all_trans = [item['transcript'] for item in batch]
         sampler = global_sampler if len(global_sampler.all_transcripts) > 0 else NegativeSampler(all_trans, dataset_name=dataset_name)
+        if seed is not None:
+            # Reset a private RNG per batch: stable validation across epochs,
+            # without changing training's global random state.
+            sampler = NegativeSampler(sampler.all_transcripts, dataset_name, rng=random.Random(seed))
 
         videos, phonemes_indices_list, labels, transcripts, audios, audio_lens, video_lens = [], [], [], [], [], [], []
         # Per-sample boundary times for the POSITIVE pair only (a negative
@@ -85,16 +96,16 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             # --- POSITIVE SAMPLE ---
             videos.append(vid)
             if dataset_name == "digit":
-                pos_indices = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in trans.split()]
+                pos_indices = tokenizer.encode(trans)
                 # digit_times: [(token, start_frame, end_frame)] over the full
                 # token sequence ("!" tokens carry their own .lab ranges)
                 token_times = [
-                    ([digit_vocab.get(d, digit_vocab["<unk>"])], fs, fe)
+                    (tokenizer.encode(d), fs, fe)
                     for d, fs, fe in item.get('digit_times') or []
                 ]
             else:
-                per_word = converter.text_to_phoneme_indices_per_word(trans)
-                pos_indices = converter.flatten_per_word(per_word)
+                per_word = tokenizer.per_word(trans)
+                pos_indices = [idx for _, ids in per_word for idx in ids]
                 word_times = item.get('word_times') or []
                 if len(word_times) == len(per_word):
                     token_times = [(ids, fs, fe) for (_, ids), (_, fs, fe) in zip(per_word, word_times)]
@@ -118,19 +129,16 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
             # --- NEGATIVE SAMPLE ---
             videos.append(vid)
             neg_trans = sampler.sample(trans)
-            if dataset_name == "digit":
-                neg_indices = [digit_vocab.get(d, digit_vocab["<unk>"]) for d in neg_trans.split()]
-            else:
-                neg_indices = converter.flatten_per_word(converter.text_to_phoneme_indices_per_word(neg_trans))
+            neg_indices = tokenizer.encode(neg_trans)
             phonemes_indices_list.append(torch.tensor(neg_indices, dtype=torch.long))
 
             # Per-token supervision: only single-substitution negatives have
             # a well-defined "wrong token" (others: masked). Spans copy the
             # positive's geometry with the substituted token ids swapped in.
             pos_words = trans.split() if dataset_name == "digit" \
-                else [w for w, _ in (converter.text_to_phoneme_indices_per_word(trans))]
+                else [w for w, _ in tokenizer.per_word(trans)]
             neg_words = neg_trans.split() if dataset_name == "digit" \
-                else [w for w, _ in (converter.text_to_phoneme_indices_per_word(neg_trans))]
+                else [w for w, _ in tokenizer.per_word(neg_trans)]
             sub_pos = substitution_position(pos_words, neg_words) if token_times else None
 
             if sub_pos is not None:
@@ -143,10 +151,9 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
                     labels_row[sub_pos] = 0.0
                     word_label_rows.append(labels_row)
                 else:
-                    # GRID token_times: [(ids, fs, fe)] per word; the swapped
-                    # word's phonemes get the positive word's frame range.
+                    # The swapped word's tokens inherit its original range.
                     if len(neg_words) == len(token_times):
-                        neg_per_word = converter.text_to_phoneme_indices_per_word(neg_trans)
+                        neg_per_word = tokenizer.per_word(neg_trans)
                         neg_times = [list(t) for t in token_times]
                         _, fs, fe = token_times[sub_pos]
                         neg_times[sub_pos] = (neg_per_word[sub_pos][1], fs, fe)
@@ -245,4 +252,4 @@ def collate_fn_factory(dataset_name, transcript_pool=None):
 
 # Default instances for tests
 default_config = Config()
-collate_fn = collate_fn_factory(default_config.dataset)
+collate_fn = collate_fn_factory(default_config.dataset, token_level=default_config.token_level)

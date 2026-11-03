@@ -8,7 +8,7 @@ from models.verification_model import LipTextVerificationModel
 from evaluation.evaluate import evaluate_model
 from evaluation.metrics import save_eer_thresholds
 from utils.dataset_utils import collate_fn_factory, Config
-from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads
+from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads, checkpoint_tokenizer
 from dataset.digit_loader import DigitDataset
 
 
@@ -55,7 +55,8 @@ def build_eval_model(checkpoint, cfg, vocab_size, device):
         feature_dim=256,
         lip_backbone_pretrained=cfg.lip_backbone_pretrained,
         alignment_mode=alignment_mode,
-        use_vfa=resolve_vfa_heads(checkpoint)
+        use_vfa=resolve_vfa_heads(checkpoint),
+        dropout=checkpoint.get("dropout", 0.0),
     ).to(device)
 
 def test(config_path="config.json"):
@@ -84,14 +85,6 @@ def test(config_path="config.json"):
         
     print(f"Test split loaded -> {len(test_dataset)} samples")
     
-    # Standard PyTorch DataLoader for evaluation
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=cfg.batch_size, 
-        shuffle=False, 
-        collate_fn=collate_fn_factory(cfg.dataset)
-    )
-    
     model_save_path = _resolve_latest_checkpoint(output_dir_abs)
     if model_save_path is None:
         print(f"No checkpoints found under {output_dir_abs}. Please train the model first.")
@@ -99,6 +92,14 @@ def test(config_path="config.json"):
 
     print(f"Loading weights from {model_save_path}...")
     checkpoint = torch.load(model_save_path, map_location=device)
+    tokenizer = checkpoint_tokenizer(checkpoint, cfg.dataset)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        collate_fn=collate_fn_factory(
+            cfg.dataset, token_level=tokenizer.token_level, seed=cfg.validation_seed),
+    )
 
     # Handle both standalone weights and wrapped checkpoint dictionaries
     state_dict = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else checkpoint
@@ -112,10 +113,7 @@ def test(config_path="config.json"):
             clean_state_dict[k] = v
 
     print("Initializing model...")
-    if cfg.dataset == "digit":
-        vocab_size = 13  # 0-9, !, <pad>, <unk>
-    else:
-        vocab_size = 41  # PhonemeConverter vocab used in training
+    vocab_size = len(tokenizer.vocab)
     model = build_eval_model(checkpoint, cfg, vocab_size, device)
 
     model.load_state_dict(clean_state_dict)
@@ -133,6 +131,7 @@ def test(config_path="config.json"):
         {
             "checkpoint": os.path.basename(model_save_path),
             "dataset": cfg.dataset,
+            "token_level": tokenizer.token_level,
             "n_samples": len(test_dataset),
         },
         thresholds_path,

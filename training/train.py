@@ -56,8 +56,7 @@ def alignment_kl_loss(sim_matrix, alignment_targets, frame_valid, temperature=1.
     return (per_sample[supervised] / counts[supervised]).mean()
 
 def vfa_frame_ce_loss(frame_logits, frame_token_ids, frame_valid):
-    """Frame-level token CE for the VFA posterior head. frame_valid gates the
-    same speech/positive/has-boundary frames as the sim-matrix CE."""
+    """VFA frame CE on valid positive frames, optionally including silence."""
     if frame_valid is not None and frame_valid.any():
         ids = frame_token_ids.clone()
         ids[~frame_valid] = -100
@@ -75,20 +74,23 @@ def vfa_boundary_loss(bound_logits, boundary_targets, frame_valid):
     return torch.zeros((), device=bound_logits.device)
 
 
-def word_verification_loss(word_logits, word_labels, word_valid):
-    """Per-token verification BCE (on raw logits, same rationale as the global
-    classifier). Supervised only where the collate emitted a token label and
-    the pair had usable spans."""
+def word_verification_loss(word_logits, word_labels, word_valid, balanced=False):
+    """Masked BCE; balanced mode averages the two class means equally."""
     if word_valid is not None and word_valid.any():
-        return F.binary_cross_entropy_with_logits(
-            word_logits[word_valid], word_labels[word_valid]
-        )
+        logits, labels = word_logits[word_valid], word_labels[word_valid]
+        losses = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+        if balanced:
+            positive, negative = labels == 1, labels == 0
+            if positive.any() and negative.any():
+                return 0.5 * (losses[positive].mean() + losses[negative].mean())
+        return losses.mean()
     return torch.zeros((), device=word_logits.device)
 
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
                     lambda_ctc=1.0, lambda_align=1.0, alignment_temperature=1.0,
-                    lambda_frame_ce=1.0, lambda_boundary=1.0, lambda_word_verif=1.0):
+                    lambda_frame_ce=1.0, lambda_boundary=1.0, lambda_word_verif=1.0,
+                    balanced_word_supervision=False, supervise_silence=False):
     model.train()
     # BCE on the raw logit: BCELoss on the post-sigmoid probability gets
     # dead gradients once the sigmoid saturates to exactly 0.0/1.0.
@@ -187,8 +189,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
         else:
             loss_align = torch.zeros((), device=device)
 
-        # VFA supervision — same valid frames as the sim-matrix CE, plus the
-        # per-token head on positives and single-substitution negatives.
+        # Silence class 0 is supervised only on real positive frames with
+        # annotations; boundary hints still represent token-to-token changes.
         loss_frame_ce = torch.zeros((), device=device)
         loss_boundary = torch.zeros((), device=device)
         loss_word = torch.zeros((), device=device)
@@ -197,13 +199,21 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
             frame_valid = speech_mask & has_align_target.unsqueeze(1).bool() & positive_mask.unsqueeze(1)
             if video_padding_mask is not None:
                 frame_valid = frame_valid & ~video_padding_mask
-            if frame_valid.any():
+            frame_ce_valid = frame_valid
+            if supervise_silence:
+                frame_ce_valid = has_align_target.unsqueeze(1).bool() & positive_mask.unsqueeze(1)
+                frame_ce_valid = frame_ce_valid.expand_as(speech_mask)
+                if video_padding_mask is not None:
+                    frame_ce_valid = frame_ce_valid & ~video_padding_mask
+            if frame_ce_valid.any():
                 frame_ids, boundary_targets = frame_token_targets(alignment_targets, phonemes)
-                loss_frame_ce = vfa_frame_ce_loss(align_out['vfa_frame_logits'], frame_ids, frame_valid)
+                loss_frame_ce = vfa_frame_ce_loss(align_out['vfa_frame_logits'], frame_ids, frame_ce_valid)
                 loss_boundary = vfa_boundary_loss(align_out['vfa_bound_logits'], boundary_targets, frame_valid)
         if 'word_verif_logits' in align_out and word_labels is not None and word_label_mask is not None:
             word_valid = word_label_mask & align_out['word_token_mask']
-            loss_word = word_verification_loss(align_out['word_verif_logits'], word_labels, word_valid)
+            loss_word = word_verification_loss(
+                align_out['word_verif_logits'], word_labels, word_valid,
+                balanced=balanced_word_supervision)
 
         loss = (loss_bce + loss_contrastive + lambda_ctc * loss_ctc + lambda_align * loss_align
                 + lambda_frame_ce * loss_frame_ce + lambda_boundary * loss_boundary
@@ -223,6 +233,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer=None,
             writer.add_scalar('Loss/train_step_frame_ce', loss_frame_ce.item(), global_step)
             writer.add_scalar('Loss/train_step_boundary', loss_boundary.item(), global_step)
             writer.add_scalar('Loss/train_step_word_verif', loss_word.item(), global_step)
+            if 'word_verif_logits' in align_out and word_labels is not None and word_label_mask is not None:
+                writer.add_scalar('WordLabels/positive', ((word_labels == 1) & word_valid).sum().item(), global_step)
+                writer.add_scalar('WordLabels/negative', ((word_labels == 0) & word_valid).sum().item(), global_step)
             writer.add_scalar('Loss/train_step_total', loss.item(), global_step)
 
         pbar.set_postfix({"loss": f"{loss.item():.4f}", "ctc": f"{loss_ctc.item():.4f}",

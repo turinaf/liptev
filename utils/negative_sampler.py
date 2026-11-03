@@ -70,6 +70,26 @@ class NegativeSampler:
             words[idx] = self.rng.choice([w for w in pool if w != word])
         return " ".join(words)
 
+    def word_substitution(self, positive_transcript):
+        """Controlled replacements with known position-wise labels.
+
+        Half are single substitutions, half change 2..N words. Some draws use
+        the full vocabulary to cover out-of-grammar transcripts as well.
+        """
+        words = positive_transcript.split()
+        if not words:
+            raise ValueError("Cannot substitute words in an empty transcript")
+        n = len(words)
+        count = 1 if n == 1 or self.rng.random() < 0.5 else self.rng.randint(2, n)
+        cross_class = self.rng.random() < 0.25
+        vocabulary = set().union(*GRID_WORD_CLASSES)
+        for pos in self.rng.sample(range(n), count):
+            word = words[pos].lower()
+            same_class = next((c for c in GRID_WORD_CLASSES if word in c), vocabulary)
+            pool = vocabulary if cross_class else same_class
+            words[pos] = self.rng.choice(sorted(pool - {word}))
+        return " ".join(words)
+
     def sample(self, positive_transcript):
         strategy = self.rng.choice(['hard', 'wrong', 'shuffled', 'phoneme_similar', 'random'])
         candidates = self.all_transcripts

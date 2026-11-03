@@ -2,6 +2,7 @@ from sklearn.metrics import roc_auc_score, roc_curve, accuracy_score
 import json
 import os
 import time
+import hashlib
 
 import numpy as np
 
@@ -76,9 +77,38 @@ def compute_metrics(labels, consistency_scores, align_scores):
     }
 
 
+def compute_word_metrics(labels, scores):
+    """Metrics for the independently trained word head on forced spans."""
+    labels = np.asarray(labels.cpu() if hasattr(labels, "cpu") else labels)
+    scores = np.asarray(scores.cpu() if hasattr(scores, "cpu") else scores)
+    positives, negatives = int((labels == 1).sum()), int((labels == 0).sum())
+    if not positives or not negatives:
+        raise ValueError(
+            f"Word evaluation needs both classes; got {positives} positive and {negatives} negative words")
+    if not np.isfinite(scores).all():
+        raise ValueError("Word evaluation scores must be finite")
+    eer, threshold = equal_error_rate(labels, scores)
+    return {
+        "word_eer": eer, "word_eer_threshold": threshold,
+        "word_roc_auc": float(roc_auc_score(labels, scores)),
+        "word_accuracy_at_eer": float(accuracy_score(labels, scores >= threshold)),
+        "word_false_match_rate": float((scores[labels == 0] >= threshold).mean()),
+        "word_false_reject_rate": float((scores[labels == 1] < threshold).mean()),
+        "word_positive_count": positives, "word_negative_count": negatives,
+    }
+
+
+def checkpoint_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _jsonable(value):
     """NaN -> None so json.dump emits valid JSON (bare NaN is not parseable)."""
-    return None if value != value else float(value)
+    return float(value) if np.isfinite(value) else None
 
 
 def save_eer_thresholds(metrics, meta, path):
@@ -103,6 +133,16 @@ def save_eer_thresholds(metrics, meta, path):
         "accuracy_at_eer": _jsonable(metrics["alignment_accuracy"]),
         "roc_auc": _jsonable(metrics["alignment_roc_auc"]),
     }
+    if "word_eer" in metrics:
+        payload["word_verification"] = {
+            "eer": _jsonable(metrics["word_eer"]),
+            "threshold": _jsonable(metrics["word_eer_threshold"]),
+            "roc_auc": _jsonable(metrics["word_roc_auc"]),
+            "accuracy_at_eer": _jsonable(metrics["word_accuracy_at_eer"]),
+            "positive_count": metrics["word_positive_count"],
+            "negative_count": metrics["word_negative_count"],
+            "span_source": "viterbi",
+        }
 
     parent = os.path.dirname(path)
     if parent:

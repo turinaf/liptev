@@ -11,6 +11,7 @@ from dataset.digit_loader import DigitDataset
 from models.verification_model import LipTextVerificationModel
 from training.train import train_one_epoch, build_optimizer, ValidationMonitor
 from evaluation.evaluate import evaluate_model
+from evaluation.metrics import save_eer_thresholds, checkpoint_sha256
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from utils.dataset_utils import Config, collate_fn_factory
@@ -73,11 +74,13 @@ def main(config_path="config.json"):
         
         transcript_pool = [s.get("transcript", "") for s in getattr(train_dataset, "samples", [])]
         custom_collate = collate_fn_factory(
-            config.dataset, transcript_pool=transcript_pool, token_level=config.token_level)
+            config.dataset, transcript_pool=transcript_pool, token_level=config.token_level,
+            balanced_word_supervision=config.balanced_word_supervision)
         val_collate = collate_fn_factory(
             config.dataset,
             transcript_pool=[s.get("transcript", "") for s in getattr(val_dataset, "samples", [])],
-            token_level=config.token_level, seed=config.validation_seed)
+            token_level=config.token_level, seed=config.validation_seed,
+            balanced_word_supervision=config.balanced_word_supervision)
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
         val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=val_collate, num_workers=4, pin_memory=True)
         
@@ -108,10 +111,17 @@ def main(config_path="config.json"):
                                          alignment_temperature=config.alignment_temperature,
                                          lambda_frame_ce=config.lambda_frame_ce,
                                          lambda_boundary=config.lambda_boundary,
-                                         lambda_word_verif=config.lambda_word_verif)
+                                         lambda_word_verif=config.lambda_word_verif,
+                                         balanced_word_supervision=config.balanced_word_supervision,
+                                         supervise_silence=config.supervise_silence)
             
-            metrics = evaluate_model(model, val_loader, device)
-            improved = monitor.update(metrics["verification_eer"])
+            metrics = evaluate_model(
+                model, val_loader, device, boundary_threshold=config.vfa_boundary_threshold,
+                word_metrics=config.balanced_word_supervision)
+            selection_eer = metrics["verification_eer"]
+            if config.balanced_word_supervision:
+                selection_eer = 0.5 * (selection_eer + metrics["word_eer"])
+            improved = monitor.update(selection_eer)
             
             if rank == 0:
                 print(
@@ -126,6 +136,10 @@ def main(config_path="config.json"):
                 writer.add_scalar('EER/align', metrics["alignment_eer"], epoch)
                 writer.add_scalar('Accuracy/verify', metrics["verification_accuracy"], epoch)
                 writer.add_scalar('Accuracy/verify_at_eer', metrics["verification_accuracy_at_eer"], epoch)
+                writer.add_scalar('EER/selection', selection_eer, epoch)
+                if config.balanced_word_supervision:
+                    writer.add_scalar('EER/word', metrics["word_eer"], epoch)
+                    writer.add_scalar('Logic/word_roc_auc', metrics["word_roc_auc"], epoch)
                 
                 # Save checkpoint (mode stamped next to the weights so eval
                 # runs can't silently score it under a different mode)
@@ -138,19 +152,29 @@ def main(config_path="config.json"):
                     token_vocab=tokenizer.vocab, dropout=config.dropout,
                 )
                 if improved:
+                    best_path = os.path.join(config.output_dir, "best_lip_verification_model.pth")
                     save_checkpoint(
                         model.module.state_dict(),
-                        os.path.join(config.output_dir, "best_lip_verification_model.pth"),
+                        best_path,
                         config.alignment_mode, vfa_heads=True,
                         dataset=config.dataset, token_level=config.token_level,
                         token_vocab=tokenizer.vocab, dropout=config.dropout,
                     )
-                    print(f"Saved best checkpoint at epoch {epoch} (Val EER {monitor.best_eer:.4f})")
+                    save_eer_thresholds(
+                        metrics,
+                        {"checkpoint": os.path.basename(best_path),
+                         "checkpoint_sha256": checkpoint_sha256(best_path),
+                         "dataset": config.dataset, "token_level": config.token_level,
+                         "split": "val", "n_samples": len(val_dataset),
+                         "boundary_threshold": config.vfa_boundary_threshold},
+                        os.path.join(config.output_dir, "eer_thresholds.json"),
+                    )
+                    print(f"Saved best checkpoint at epoch {epoch} (selection EER {monitor.best_eer:.4f})")
             # evaluate_model gathers every rank, so all ranks make the same
             # stop decision and exit DDP together.
             if monitor.should_stop:
                 if rank == 0:
-                    print(f"Early stopping after {monitor.bad_epochs} epochs without Val EER improvement.")
+                    print(f"Early stopping after {monitor.bad_epochs} epochs without selection EER improvement.")
                 break
     finally:
         if writer is not None:

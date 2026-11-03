@@ -37,6 +37,25 @@ def uniform_token_spans(T, n_tokens):
     return spans
 
 
+def spans_to_onehot(spans, T, L):
+    """(position, start, end) spans -> T x L weights for token pooling."""
+    onehot = torch.zeros(T, L)
+    for pos, start, end in spans:
+        if 0 <= pos < L:
+            onehot[start:end, pos] = 1.0
+    return onehot
+
+
+def forced_token_spans(frame_logits, tokens, bound_probs, boundary_threshold=0.8):
+    """Shared inference/evaluation decoding, including short-video fallback."""
+    labels = [0] + list(tokens) + [0]
+    fallback = len(frame_logits) < len(labels)
+    if fallback:
+        return uniform_token_spans(len(frame_logits), len(tokens)), True
+    alignment = viterbi_align(frame_logits, labels, bound_probs, boundary_threshold)
+    return token_spans(alignment, labels), False
+
+
 def viterbi_align(logits, labels, bound_probs=None, boundary_threshold=0.8):
     """Return a frame->label list (length T) for the ordered `labels`.
 

@@ -31,7 +31,7 @@ def test_build_token_report_values_and_verdicts():
         posterior_scores=[0.9, 0.6],
         word_scores=[0.8, 0.4],
         verification_scores=[0.95, 0.20],
-        thresholds={"verification": 0.5},
+        thresholds={"word_verification": 0.5},
         fallback=False,
     )
     assert rows[0]["token"] == "1"
@@ -69,7 +69,7 @@ def test_build_token_report_alignment_score_signals():
     rows = build_token_report(
         ["1"], [(0, 0, 10)], seconds_per_frame=0.04,
         posterior_scores=[None], word_scores=[0.7], verification_scores=[0.9],
-        thresholds={"verification": 0.5}, fallback=False,
+        thresholds={"word_verification": 0.5}, fallback=False,
     )
     assert abs(rows[0]["alignment_score"] - 0.7) < 1e-6
     assert rows[0]["verification_score"] == 0.9
@@ -77,14 +77,14 @@ def test_build_token_report_alignment_score_signals():
     rows = build_token_report(
         ["2"], [(0, 0, 10)], seconds_per_frame=0.04,
         posterior_scores=[0.3], word_scores=[None], verification_scores=[0.1],
-        thresholds={"verification": 0.5}, fallback=False,
+        thresholds={"word_verification": 0.5}, fallback=False,
     )
     assert abs(rows[0]["alignment_score"] - 0.3) < 1e-6
     # both present -> mean (distinct signals must not be conflated)
     rows = build_token_report(
         ["3"], [(0, 0, 10)], seconds_per_frame=0.04,
         posterior_scores=[0.4], word_scores=[0.8], verification_scores=[0.1],
-        thresholds={"verification": 0.5}, fallback=False,
+        thresholds={"word_verification": 0.5}, fallback=False,
     )
     assert abs(rows[0]["alignment_score"] - 0.6) < 1e-6
 
@@ -97,7 +97,7 @@ def _phoneme_rows():
         posterior_scores=[0.9, 0.8, 0.7, 0.6, 0.9],
         word_scores=[0.9, 0.8, 0.7, 0.6, 0.9],
         verification_scores=[0.9, 0.6, 0.8, 0.2, 0.9],
-        thresholds={"verification": {"threshold": 0.5}},
+        thresholds={"word_verification": {"threshold": 0.5}},
         fallback=False,
     )
 
@@ -156,7 +156,7 @@ def test_word_report_preserves_threshold_decisions_before_rounding():
         ["AE", "T"], [(0, 0, 1), (1, 1, 2)], seconds_per_frame=0.04,
         posterior_scores=[0.8, 0.8], word_scores=[0.8, 0.8],
         verification_scores=[0.50001, 0.49999],
-        thresholds={"verification": 0.5}, fallback=False,
+        thresholds={"word_verification": 0.5}, fallback=False,
     )
     assert parts[0]["verification_score"] == parts[1]["verification_score"] == 0.5
     assert build_word_report([("at", [3, 32])], parts)[0]["verdict"] == "MISMATCH"

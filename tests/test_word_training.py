@@ -236,8 +236,7 @@ def test_word_inference_emits_direct_word_rows(tmp_path):
           mock.patch("inference.extract_lip_frames", return_value=[np.zeros((96, 96, 3))] * 16),
           mock.patch("inference.cv2.VideoCapture") as cap,
           mock.patch("inference.load_eer_thresholds", return_value=None),
-          mock.patch("inference.viterbi_align"),
-          mock.patch("inference.token_spans", return_value=spans),
+          mock.patch("inference.forced_token_spans", return_value=(spans, False)),
           mock.patch("inference.build_word_report") as aggregate):
         cap.return_value.get.return_value = 25.0
         run_inference("clip.mp4", "bin blue at f two now", dataset="grid",
@@ -262,7 +261,7 @@ def test_evaluation_uses_checkpoint_word_tokens_with_legacy_config(tmp_path):
         "dataset": "grid", "token_level": "word", "token_vocab": tokenizer.vocab,
     }
 
-    def evaluate(model, loader, device):
+    def evaluate(model, loader, device, **kwargs):
         batch = next(iter(loader))
         assert batch["phonemes"].shape == (2, 6)
         assert batch["phonemes"][0].tolist() == tokenizer.encode(_item()["transcript"])
@@ -274,6 +273,7 @@ def test_evaluation_uses_checkpoint_word_tokens_with_legacy_config(tmp_path):
           mock.patch.object(entrypoint.torch, "load", return_value=checkpoint),
           mock.patch.object(entrypoint, "build_eval_model") as build,
           mock.patch.object(entrypoint, "evaluate_model", side_effect=evaluate),
+          mock.patch.object(entrypoint, "checkpoint_sha256", return_value="digest"),
           mock.patch.object(entrypoint, "save_eer_thresholds") as save):
         entrypoint.test()
     assert build.call_args.args[2] == 53

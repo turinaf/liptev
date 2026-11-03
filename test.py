@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from dataset.grid_loader import GRIDDataset
 from models.verification_model import LipTextVerificationModel
 from evaluation.evaluate import evaluate_model
-from evaluation.metrics import save_eer_thresholds
+from evaluation.metrics import save_eer_thresholds, checkpoint_sha256
 from utils.dataset_utils import collate_fn_factory, Config
 from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads, checkpoint_tokenizer
 from dataset.digit_loader import DigitDataset
@@ -93,12 +93,15 @@ def test(config_path="config.json"):
     print(f"Loading weights from {model_save_path}...")
     checkpoint = torch.load(model_save_path, map_location=device)
     tokenizer = checkpoint_tokenizer(checkpoint, cfg.dataset)
+    controlled_grid = cfg.dataset == "grid" and tokenizer.token_level == "word"
+    word_metrics = bool(checkpoint.get("vfa_heads")) and (controlled_grid or cfg.dataset == "digit")
     test_loader = DataLoader(
         test_dataset,
         batch_size=cfg.batch_size,
         shuffle=False,
         collate_fn=collate_fn_factory(
-            cfg.dataset, token_level=tokenizer.token_level, seed=cfg.validation_seed),
+            cfg.dataset, token_level=tokenizer.token_level, seed=cfg.validation_seed,
+            balanced_word_supervision=controlled_grid),
     )
 
     # Handle both standalone weights and wrapped checkpoint dictionaries
@@ -118,26 +121,42 @@ def test(config_path="config.json"):
 
     model.load_state_dict(clean_state_dict)
     
-    print("\n[--- Testing Phase ---]")
-    print("Evaluating Model on Hold-out Test Set...")
-    test_metrics = evaluate_model(model, test_loader, device)
-
-    # Persist the EER calibration so single-pair inference (which
-    # auto-discovers this file next to the checkpoint) can make
-    # MATCH/MISMATCH decisions at the EER-optimal thresholds.
+    dataset_class = DigitDataset if cfg.dataset == "digit" else GRIDDataset
+    val_dataset = dataset_class(
+        data_dir=dataset_path, split="val", max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+    if len(val_dataset) == 0:
+        raise RuntimeError("Validation split is empty; cannot calibrate on the test set")
+    val_pool = [sample["transcript"] for sample in getattr(val_dataset, "samples", [])]
+    val_loader = DataLoader(
+        val_dataset, batch_size=cfg.batch_size, shuffle=False,
+        collate_fn=collate_fn_factory(
+            cfg.dataset, transcript_pool=val_pool, token_level=tokenizer.token_level,
+            seed=cfg.validation_seed, balanced_word_supervision=controlled_grid),
+    )
+    print("\n[--- Validation Calibration ---]")
+    val_metrics = evaluate_model(
+        model, val_loader, device, boundary_threshold=cfg.vfa_boundary_threshold,
+        word_metrics=word_metrics)
     thresholds_path = os.path.join(output_dir_abs, "eer_thresholds.json")
     save_eer_thresholds(
-        test_metrics,
+        val_metrics,
         {
             "checkpoint": os.path.basename(model_save_path),
+            "checkpoint_sha256": checkpoint_sha256(model_save_path),
             "dataset": cfg.dataset,
             "token_level": tokenizer.token_level,
-            "n_samples": len(test_dataset),
+            "split": "val", "n_samples": len(val_dataset),
+            "boundary_threshold": cfg.vfa_boundary_threshold,
         },
         thresholds_path,
     )
     print(f"EER thresholds saved to {thresholds_path}")
 
+    print("\n[--- Testing Phase ---]")
+    print("Evaluating Model on Hold-out Test Set (not used for calibration)...")
+    test_metrics = evaluate_model(
+        model, test_loader, device, boundary_threshold=cfg.vfa_boundary_threshold,
+        word_metrics=word_metrics)
     print(f"\nFinal Test Result -> AUC: {test_metrics['roc_auc']:.4f} | Acc: {test_metrics['verification_accuracy']:.4f} | EER: {test_metrics['verification_eer']:.4f}")
 
 if __name__ == "__main__":

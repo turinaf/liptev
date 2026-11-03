@@ -14,8 +14,8 @@ from dataset.preprocessing import extract_lip_frames
 from models.verification_model import LipTextVerificationModel
 from utils.dataset_utils import Config
 from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads, checkpoint_tokenizer
-from utils.viterbi import viterbi_align, token_spans, uniform_token_spans
-from evaluation.metrics import load_eer_thresholds
+from utils.viterbi import forced_token_spans, spans_to_onehot
+from evaluation.metrics import load_eer_thresholds, checkpoint_sha256
 import argparse
 import sys
 import glob
@@ -43,6 +43,26 @@ def score_verdict(score, block):
         return "uncalibrated"
     return "MATCH" if score >= thr else "MISMATCH"
 
+def validate_calibration(calibration, checkpoint_path, dataset, token_level, boundary_threshold):
+    if calibration is None:
+        return None
+    digest = calibration.get("checkpoint_sha256")
+    if digest and digest != checkpoint_sha256(checkpoint_path):
+        print("Warning: calibration belongs to different checkpoint weights; all verdicts are uncalibrated.")
+        return None
+    if calibration.get("dataset", dataset) != dataset or calibration.get("token_level", token_level) != token_level:
+        print("Warning: calibration dataset/token level does not match; all verdicts are uncalibrated.")
+        return None
+    calibration = dict(calibration)
+    word_block = calibration.get("word_verification")
+    if word_block is not None and (
+        not digest or word_block.get("span_source") != "viterbi"
+        or calibration.get("boundary_threshold") != boundary_threshold
+    ):
+        print("Warning: word calibration lacks matching weights/decoding settings; word verdicts are uncalibrated.")
+        calibration.pop("word_verification")
+    return calibration
+
 def format_score_decision(label, score, block):
     """One report line: raw score plus the MATCH/MISMATCH call at the
     EER-optimal threshold."""
@@ -52,19 +72,11 @@ def format_score_decision(label, score, block):
     return (f"{label}: {score:.4f}  ->  {decision} "
             f"(EER thr {block['threshold']:.4f}, EER {block['eer']:.4f})")
 
-def spans_to_onehot(spans, T, L):
-    """(pos, start, end) spans -> T x L one-hot for token pooling."""
-    onehot = torch.zeros(T, L)
-    for pos, s, e in spans:
-        if pos < L:
-            onehot[s:e, pos] = 1.0
-    return onehot
-
 def build_token_report(tokens, spans, seconds_per_frame, posterior_scores,
                        word_scores, verification_scores, thresholds, fallback):
     """Per-token JSON rows: timestamps, alignment score (mean of posterior and
     cross-modal word score), verification score, verdict, confidence flag."""
-    ver_thr = (thresholds or {}).get("verification") or {}
+    ver_thr = (thresholds or {}).get("word_verification") or {}
     ver_thr = ver_thr.get("threshold") if isinstance(ver_thr, dict) else ver_thr
     by_pos = {pos: (s, e) for pos, s, e in spans if e > s}
     rows = []
@@ -84,7 +96,7 @@ def build_token_report(tokens, spans, seconds_per_frame, posterior_scores,
         else:
             align = 0.5 * (post + word)
         verif = verification_scores[i]
-        verdict = "uncalibrated" if verif is None else \
+        verdict = "uncalibrated" if verif is None or fallback else \
             score_verdict(verif, {"threshold": ver_thr})
         rows.append({"token": tok, "start_s": round(s * seconds_per_frame, 3),
                      "end_s": round(e * seconds_per_frame, 3),
@@ -381,7 +393,9 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
 
     print(f"=====================================")
     calib_path = resolve_thresholds_path(thresholds_path, resolved_model_path)
-    calib = load_eer_thresholds(calib_path)
+    calib = validate_calibration(
+        load_eer_thresholds(calib_path), resolved_model_path, dataset,
+        tokenizer.token_level, cfg.vfa_boundary_threshold)
     if calib is not None:
         calib_ckpt = calib.get("checkpoint")
         if calib_ckpt and os.path.basename(calib_ckpt) != os.path.basename(resolved_model_path):
@@ -396,7 +410,7 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
         # makes these numbers decidable.
         print(f"Verification score (uncalibrated): {prob:.4f}")
         print(f"Alignment score (uncalibrated):    {align_prob:.4f}")
-        print("No eer_thresholds.json found next to the checkpoint.")
+        print("No compatible EER calibration is available.")
         print("Run test.py to calibrate EER thresholds for single-pair decisions.")
     print(f"=====================================")
 
@@ -406,6 +420,8 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
         header = "Per-word alignment (GRID):" if dataset == "grid" \
             else "Per-token alignment:"
         print(header)
+        if not (calib or {}).get("word_verification"):
+            print("No independent word/token calibration; per-token verdicts are uncalibrated. Run test.py.")
         cap = cv2.VideoCapture(video_path)
         cap_fps = cap.get(cv2.CAP_PROP_FPS) if cap else 0
         cap.release()
@@ -414,14 +430,8 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
         with torch.no_grad():
             frame_logits = align_out["vfa_frame_logits"][0, :true_video_len]
             bound_probs = torch.sigmoid(align_out["vfa_bound_logits"][0, :true_video_len]).cpu().numpy()
-            labels = [0] + phones + [0]
-            fallback = true_video_len < len(labels)
-            if fallback:
-                spans = uniform_token_spans(true_video_len, len(phones))
-            else:
-                f2l = viterbi_align(frame_logits, labels, bound_probs,
-                                    boundary_threshold=cfg.vfa_boundary_threshold)
-                spans = token_spans(f2l, labels)
+            spans, fallback = forced_token_spans(
+                frame_logits, phones, bound_probs, cfg.vfa_boundary_threshold)
             # Video shorter than the transcript: the uniform split degenerates
             # to zero-length spans; drop them so those tokens report missing
             # (nulls, low confidence) instead of NaN scores.

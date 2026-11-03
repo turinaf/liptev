@@ -25,6 +25,8 @@ class Config:
         self.dropout = cfg.get("dropout", 0.0)
         self.early_stopping_patience = cfg.get("early_stopping_patience", 0)
         self.validation_seed = cfg.get("validation_seed", 42)
+        self.balanced_word_supervision = cfg.get("balanced_word_supervision", False)
+        self.supervise_silence = cfg.get("supervise_silence", False)
         if self.token_level not in ("phoneme", "word"):
             raise ValueError("token_level must be 'phoneme' or 'word'")
         if self.weight_decay < 0 or not 0 <= self.dropout < 1:
@@ -69,7 +71,10 @@ def substitution_position(pos_words, neg_words):
     return diffs[0] if len(diffs) == 1 else None
 
 
-def collate_fn_factory(dataset_name, transcript_pool=None, token_level="phoneme", seed=None):
+def collate_fn_factory(dataset_name, transcript_pool=None, token_level="phoneme", seed=None,
+                       balanced_word_supervision=False):
+    if balanced_word_supervision and (dataset_name != "grid" or token_level != "word"):
+        raise ValueError("Balanced word supervision requires GRID word tokens")
     tokenizer = TranscriptTokenizer(dataset_name, token_level)
     global_sampler = NegativeSampler(transcript_pool or [], dataset_name=dataset_name)
 
@@ -128,20 +133,30 @@ def collate_fn_factory(dataset_name, transcript_pool=None, token_level="phoneme"
 
             # --- NEGATIVE SAMPLE ---
             videos.append(vid)
-            neg_trans = sampler.sample(trans)
+            controlled = balanced_word_supervision and sampler.rng.random() < 0.75
+            neg_trans = sampler.word_substitution(trans) if controlled else sampler.sample(trans)
+            if balanced_word_supervision and neg_trans == trans:
+                # A one-transcript pool can defeat the legacy random sampler.
+                controlled = True
+                neg_trans = sampler.word_substitution(trans)
             neg_indices = tokenizer.encode(neg_trans)
             phonemes_indices_list.append(torch.tensor(neg_indices, dtype=torch.long))
 
-            # Per-token supervision: only single-substitution negatives have
-            # a well-defined "wrong token" (others: masked). Spans copy the
-            # positive's geometry with the substituted token ids swapped in.
+            # Only controlled replacements (or legacy single substitutions)
+            # have known geometry. Random/shuffled multi-word negatives stay
+            # masked: position-wise equality does not establish their timing.
             pos_words = trans.split() if dataset_name == "digit" \
                 else [w for w, _ in tokenizer.per_word(trans)]
             neg_words = neg_trans.split() if dataset_name == "digit" \
                 else [w for w, _ in tokenizer.per_word(neg_trans)]
             sub_pos = substitution_position(pos_words, neg_words) if token_times else None
 
-            if sub_pos is not None:
+            if controlled and token_times:
+                neg_times = [([idx], fs, fe) for idx, (_, fs, fe) in zip(neg_indices, token_times)]
+                word_token_times_list.append(neg_times)
+                word_label_rows.append(torch.tensor(
+                    [float(p == n) for p, n in zip(pos_words, neg_words)]))
+            elif sub_pos is not None:
                 if dataset_name == "digit":
                     # digit token_times: [([id], fs, fe)] per position
                     neg_times = [list(t) for t in token_times]
@@ -252,4 +267,6 @@ def collate_fn_factory(dataset_name, transcript_pool=None, token_level="phoneme"
 
 # Default instances for tests
 default_config = Config()
-collate_fn = collate_fn_factory(default_config.dataset, token_level=default_config.token_level)
+collate_fn = collate_fn_factory(
+    default_config.dataset, token_level=default_config.token_level,
+    balanced_word_supervision=default_config.balanced_word_supervision)

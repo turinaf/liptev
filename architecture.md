@@ -178,7 +178,7 @@ flowchart TB
 
 **Text → tokens** (`utils/tokenizer.py`): GRID word mode lowercases/strips punctuation and maps each word to a fixed ID from the 51-word GRID grammar (`<pad>=0`, `<unk>=1`, remaining words sorted). Out-of-vocabulary words raise an error. Each word retains its full `.align` frame range: no artificial phoneme splitting. The same IDs feed the text encoder, CTC and frame posterior head. Legacy phoneme mode uses `PhonemeConverter` and uniformly distributes a word's range across its phonemes. The batch keys `phonemes` and `phoneme_padding_mask` retain their historical names but carry word IDs in word mode.
 
-**Negative sampling** (`utils/negative_sampler.py`) picks one of five strategies at random:
+**Negative sampling** (`utils/negative_sampler.py`): balanced GRID word mode uses controlled replacements for 75% of negative pairs. Half of these replace one word, half replace 2..N words; 25% of controlled draws allow cross-grammar replacements. The other 25% of negative pairs (and all legacy/digit draws) use the existing strategies:
 
 | Strategy | Corruption |
 |---|---|
@@ -189,7 +189,7 @@ flowchart TB
 
 A global guard guarantees the negative ≠ positive (e.g., shuffling `"7 7 7 7"` would otherwise produce a mislabeled pair). Negatives get empty `token_times` — a mismatched transcript has no valid alignment supervision.
 
-**Per-token verification supervision** — alongside `alignment_targets`, the collate emits three tensors for the VFA word-verification head (§4.7): `word_spans` (`B×T×L` one-hot, also built for single-substitution negatives), `word_labels` (`B×L`, 1 on true tokens, 0 on the substituted word/digit) and `word_label_mask`. A substitution keeps the original word's complete frame range but replaces its token ID and label. Non-substitution negatives carry no per-token supervision.
+**Per-token verification supervision** — alongside `alignment_targets`, the collate emits `word_spans` (`B×T×L` one-hot), `word_labels` (`B×L`) and `word_label_mask`. Controlled single/multi-word negatives preserve every original word range: each replaced position gets label 0 and each unchanged position label 1. Uncontrolled multi-word negatives are masked; legacy single substitutions retain their supervision. Batch size remains two pairs per source clip.
 
 ---
 
@@ -331,7 +331,7 @@ flowchart TB
     POOLT -.-> SWS
 ```
 
-- **Frame head** — per-frame logits over `[silence + vocab]` (class 0 is silence; the `<pad>` id never appears in transcripts). Supervised with cross-entropy (`ignore_index` on padded frames) against frame token ids derived from the `.align`/`.lab` boundary times.
+- **Frame head** — per-frame logits over `[silence + vocab]` (class 0 is silence; the `<pad>` id never appears in transcripts). With GRID `supervise_silence=true`, real frames outside speech receive silence targets as well. Padding, negatives and samples without annotations are excluded. Legacy/digit defaults keep speech-only supervision.
 - **Boundary head** — one transition logit per frame, trained with `BCEWithLogits` against token-to-token handovers in the ground-truth alignment.
 - **Word verification head** — for each token position, span-pool the lip features and concatenate the text-encoder embedding → a per-token logit: the per-token analogue of the global classifier, so *"which digit was wrong"* becomes answerable, not just *"the clip is wrong"*.
 
@@ -353,7 +353,7 @@ flowchart LR
     SIM["sim_matrix (lip↔text)"] --> ALN["L_align = frame→token<br/>cross-entropy vs one-hot<br/>alignment_targets<br/>speech frames, positives<br/>with boundary data only"]
     FLOG["vfa_frame_logits"] --> FCE["L_frame_ce = CE vs frame token ids<br/>(ignore_index on padded frames)"]
     BLOG["vfa_bound_logits"] --> BND["L_boundary = BCEWithLogits<br/>vs token handovers"]
-    WLOG["word_verif_logits"] --> WVER["L_word_verif = per-token BCE:<br/>positives label 1, swapped token<br/>of substitution negatives label 0,<br/>masked by word_label_mask<br/>& word_token_mask"]
+    WLOG["word_verif_logits"] --> WVER["L_word_verif = class-balanced BCE:<br/>matching words label 1,<br/>replaced words label 0,<br/>masked by word_label_mask<br/>& word_token_mask"]
     BCE & CON & CTC & ALN & FCE & BND & WVER --> TOT["Total = L_bce + L_contrastive + λ_ctc·L_ctc<br/>+ λ_align·L_align + λ_frame·L_frame_ce<br/>+ λ_bound·L_boundary + λ_word·L_word_verif<br/>(λ from config, default 1.0)"]
 ```
 
@@ -363,9 +363,11 @@ flowchart LR
 - **Frame-level alignment CE** (`alignment_kl_loss`) supervises the cosine similarity matrix against the one-hot `alignment_targets` built from `.align`/`.lab` boundaries — each speech frame must attend to its current word/digit. Per-sample means are averaged only over samples with targets, so partial boundary coverage doesn't bias the loss.
 - **VFA frame CE** (`vfa_frame_ce_loss`, weight `lambda_frame_ce`) trains the frame head's per-frame token logits (`ignore_index` on padded frames).
 - **VFA boundary BCE** (`vfa_boundary_loss`, weight `lambda_boundary`) trains the boundary head on token-to-token handovers.
-- **VFA word verification BCE** (`word_verification_loss`, weight `lambda_word_verif`) trains the per-token head on positives (all tokens label 1) and single-substitution negatives (swapped token label 0), active only where `word_label_mask & word_token_mask`. All three run only when the checkpoint was built with `vfa_heads=true` and the batch carries the supervision tensors.
+- **VFA word verification BCE** (`word_verification_loss`, weight `lambda_word_verif`) uses equal-weight positive and negative class means when GRID `balanced_word_supervision=true`, rather than averaging all tokens together. Only `word_label_mask & word_token_mask` positions participate; single-class batches use the available class mean. Controlled multi-substitutions provide multiple label-0 words per negative transcript.
 
-**Orchestration** (`main.py`): DDP over all visible GPUs (torchrun or auto-spawn), AdamW when weight decay is enabled (otherwise legacy Adam), per-epoch validation computing **ROC AUC, EER, verification accuracy**, TensorBoard scalars, per-epoch checkpoints and a best-validation-EER checkpoint. Validation negatives are repeatable; metrics gather all ranks so checkpoint selection and early stopping agree across ranks. GRID configs cap training at 30 epochs with weight decay 0.01, feature dropout 0.2 and patience 5. Checkpoints stamp dataset, token level, exact vocabulary and dropout as well as alignment mode and VFA-head presence. Word models use a separate `grid-word` experiment directory.
+**Orchestration** (`main.py`): DDP over all visible GPUs, AdamW when weight decay is enabled (otherwise legacy Adam), TensorBoard and per-epoch checkpoints. Balanced GRID selection/early stopping minimizes the mean of global and word validation EER. Word evaluation shares inference's forced decoder and pools predicted spans (not ground-truth spans); fallback/missing/unannotated spans are excluded. Metrics gather all ranks before selection. GRID caps training at 30 epochs with weight decay 0.01, feature dropout 0.2 and patience 5.
+
+Each best checkpoint writes validation calibration, with a separate `word_verification` threshold and checkpoint SHA-256. `test.py` calibrates on validation before evaluating test; test scores never set saved thresholds. Inference never borrows the global threshold for words, rejects calibration for mismatched weights, and marks word verdicts uncalibrated if independent calibration/decoder settings are missing. Checkpoints stamp dataset, token level, exact vocabulary, dropout, alignment mode and VFA presence. Runs keep using `grid-word`, so restarting training overwrites matching filenames.
 
 ---
 

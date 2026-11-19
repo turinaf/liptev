@@ -81,8 +81,12 @@ def main(config_path="config.json"):
             transcript_pool=[s.get("transcript", "") for s in getattr(val_dataset, "samples", [])],
             token_level=config.token_level, seed=config.validation_seed,
             balanced_word_supervision=config.balanced_word_supervision)
-        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=val_collate, num_workers=4, pin_memory=True)
+        # Per-rank loader workers; train.sbatch sizes this to the node's CPUs.
+        num_workers = int(os.environ.get("LIPTEV_NUM_WORKERS", 4))
+        if num_workers < 0:
+            raise ValueError("LIPTEV_NUM_WORKERS must be nonnegative")
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, sampler=train_sampler, collate_fn=custom_collate, num_workers=num_workers, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, sampler=val_sampler, collate_fn=val_collate, num_workers=num_workers, pin_memory=True)
         
         tokenizer = TranscriptTokenizer(config.dataset, config.token_level)
         vocab_size = len(tokenizer.vocab)

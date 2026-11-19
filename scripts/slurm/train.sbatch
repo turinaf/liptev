@@ -2,17 +2,21 @@
 #SBATCH --job-name=liptev-train
 #SBATCH --partition=a3m
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=208
+#SBATCH --mem=0
+#SBATCH --exclusive
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
 
-# Submit with overrides, e.g. (from the repo root):
+# Takes a whole a3m node: 8 GPUs, all 208 CPUs and all memory (--mem=0).
+# Submit from the repo root:
 #   mkdir -p logs && sbatch scripts/slurm/train.sbatch
-#   sbatch --gres=gpu:2 scripts/slurm/train.sbatch
-#   sbatch --gres=gpu:2 --export=ALL,DATASET=digit scripts/slurm/train.sbatch
+#   sbatch --export=ALL,DATASET=digit scripts/slurm/train.sbatch
+# Smaller runs override the request, e.g.
+#   sbatch --gres=gpu:2 --cpus-per-task=52 --mem=400G --no-exclusive scripts/slurm/train.sbatch
 
 set -euo pipefail
 
@@ -26,6 +30,12 @@ if [ -z "${NGPUS:-}" ]; then
         NGPUS="${SLURM_GPUS_ON_NODE:-1}"
     fi
 fi
+# Split the allocated CPUs between ranks: per rank, keep 2 cores for the
+# training process and give the rest to DataLoader workers.
+CPUS="${SLURM_CPUS_PER_TASK:-$(nproc)}"
+CPUS_PER_RANK=$(( CPUS / NGPUS ))
+export LIPTEV_NUM_WORKERS="${LIPTEV_NUM_WORKERS:-$(( CPUS_PER_RANK > 3 ? CPUS_PER_RANK - 2 : 1 ))}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
 PYENV_VERSION="${PYENV_VERSION:-3.14.8}"   # pyenv version with torch, mediapipe, g2p_en, tqdm
 
@@ -47,6 +57,7 @@ if [ ! -f "$CONFIG" ]; then
 fi
 
 echo "Job: $SLURM_JOB_ID  Node: $(hostname)  GPUs: $NGPUS  CUDA: ${CUDA_VISIBLE_DEVICES:-unset}"
+echo "CPUs: $CPUS  Loader workers/rank: $LIPTEV_NUM_WORKERS  OMP threads/rank: $OMP_NUM_THREADS"
 echo "Repo: $REPO_DIR  Dataset: $DATASET  Config: $CONFIG"
 echo "Python: $($PYTHON --version 2>&1) ($PYTHON)"
 

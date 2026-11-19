@@ -56,10 +56,12 @@ Config files: `config.grid.json` / `config.digit.json` (checkpoints and logs go 
 
 ```bash
 mkdir -p logs
-sbatch scripts/slurm/train.sbatch                       # grid, 1 GPU
-sbatch --gres=gpu:2 scripts/slurm/train.sbatch          # grid, 2 GPUs (DDP, one process per GPU)
+sbatch scripts/slurm/train.sbatch                       # grid, whole node: 8 GPUs, 208 CPUs, all memory
 sbatch --export=ALL,DATASET=digit scripts/slurm/train.sbatch
+sbatch --gres=gpu:2 --cpus-per-task=52 --mem=400G --no-exclusive scripts/slurm/train.sbatch  # smaller shared run
 ```
+
+Training runs one DDP process per GPU. Each rank gets `(CPUs / GPUs) - 2` DataLoader workers (24 on a full node), set via `LIPTEV_NUM_WORKERS` (default 4 outside the script). `batch_size` is per GPU, so 8 GPUs give an effective batch of `8 x batch_size` (192 with the shipped configs); the learning rate is not scaled automatically.
 
 GRID configs (`config.json` and `config.grid.json`) use `token_level: "word"` throughout: one text-encoder ID per word, word CTC targets, whole-word frame/boundary targets, and word verification labels. The vocabulary is deterministic and shared with negative sampling (GRID letters exclude `w`; adverbs are `again`, `now`, `please`, `soon`). Out-of-vocabulary GRID words raise an error instead of silently training unknown tokens.
 

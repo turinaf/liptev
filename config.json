@@ -1,5 +1,5 @@
 {
-    "dataset": "grid",
+    "dataset": "digit",
     "token_level": "word",
     "balanced_word_supervision": true,
     "supervise_silence": true,
@@ -10,11 +10,11 @@
     "use_audio": false,
     "train_augmentation": true,
     "audio_sample_rate": 16000,
-    "max_frames": 75,
+    "max_frames": 125,
     "digit_max_frames": 125,
     "digit_source_fps": 29.87,
     "mp_model_path": "face_landmarker.task",
-    "batch_size": 24,
+    "batch_size": 12,
     "learning_rate": 0.0001,
     "weight_decay": 0.01,
     "dropout": 0.2,
@@ -25,10 +25,10 @@
     "lambda_ctc": 1.0,
     "lambda_align": 1.0,
     "alignment_temperature": 1.0,
-    "alignment_mode": "sim",
+    "alignment_mode": "both",
     "lambda_frame_ce": 1.0,
     "lambda_boundary": 1.0,
     "lambda_word_verif": 1.0,
     "vfa_boundary_threshold": 0.8,
-    "output_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/liptev-exp/grid-word-speaker-disjoint"
+    "output_dir": "./exp/digit/no_audio/digit-word-speaker-disjoint"
 }

@@ -3,14 +3,13 @@ os.environ['GLOG_minloglevel'] = '2' # Suppress mediapipe C++ logging
 
 import sys
 # Ensure module resolution across repo
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import glob
 import json
 import cv2
 import shutil
 import numpy as np
-import random
 from tqdm import tqdm
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -18,6 +17,7 @@ from mediapipe.tasks.python import vision
 
 from dataset.preprocessing import extract_lip_frames
 from dataset.audio_extraction import extract_audio
+from create_splits import create_splits
 
 def save_video_from_frames(frames, output_path, fps=25):
     """
@@ -190,32 +190,7 @@ def prepare_dataset(config_path="config.json"):
             if not os.path.exists(out_aln_path):
                 shutil.copy2(src_aln_path, out_aln_path)
 
-    print("\nCreating Train/Val/Test splits...")
-    all_videos = glob.glob(os.path.join(out_dir, '*', 'video', '*.mp4'))
-    
-    random.seed(42) 
-    random.shuffle(all_videos)
-    
-    total_size = len(all_videos)
-    test_size = max(1, int(total_size * 0.1))
-    val_size = max(1, int(total_size * 0.1))
-    train_size = total_size - val_size - test_size
-    
-    train_videos = all_videos[:train_size]
-    val_videos = all_videos[train_size:train_size + val_size]
-    test_videos = all_videos[train_size + val_size:]
-    
-    with open(os.path.join(out_dir, "train_split.json"), "w") as f:
-        json.dump(train_videos, f)
-    with open(os.path.join(out_dir, "val_split.json"), "w") as f:
-        json.dump(val_videos, f)
-    with open(os.path.join(out_dir, "test_split.json"), "w") as f:
-        json.dump(test_videos, f)
-        
-    print(f"Data split saved in {out_dir}:")
-    print(f" - Train: {len(train_videos)}")
-    print(f" - Val:   {len(val_videos)}")
-    print(f" - Test:  {len(test_videos)}")
+    create_splits(config_path)
 
 if __name__ == "__main__":
     import argparse

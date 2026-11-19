@@ -49,7 +49,8 @@ def test_entry_points_accept_config_flag():
     # without a GPU or data present.
     import subprocess
     import sys
-    for entry in ("main.py", "test.py", "pipeline/data_preparation.py"):
+    for entry in ("main.py", "test.py", "pipeline/data_preparation.py", "create_splits.py",
+                  "digit_create_splits.py"):
         res = subprocess.run(
             [sys.executable, entry, "--help"], capture_output=True, text=True
         )

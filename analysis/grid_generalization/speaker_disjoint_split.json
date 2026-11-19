@@ -1,0 +1,84 @@
+{
+  "created_at": "2026-11-19T06:41:47.528609+00:00",
+  "strategy": "GRID speaker-disjoint; sorted speaker IDs, private random seed 42, approximately 80/10/10 by speaker",
+  "data_root": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/GRID_processed",
+  "split_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/GRID_processed",
+  "original_manifest_backup_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/GRID_processed/split_backups/20261119T064016418347Z",
+  "output_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/liptev-exp/grid-word-speaker-disjoint",
+  "total_clips": 32984,
+  "total_speakers": 33,
+  "splits": {
+    "train": {
+      "clips": 26984,
+      "speakers": 27,
+      "speaker_counts": {
+        "s10_processed": 1000,
+        "s12_processed": 1000,
+        "s13_processed": 1000,
+        "s14_processed": 1000,
+        "s15_processed": 984,
+        "s16_processed": 1000,
+        "s19_processed": 1000,
+        "s1_processed": 1000,
+        "s20_processed": 1000,
+        "s22_processed": 1000,
+        "s23_processed": 1000,
+        "s24_processed": 1000,
+        "s25_processed": 1000,
+        "s26_processed": 1000,
+        "s27_processed": 1000,
+        "s28_processed": 1000,
+        "s29_processed": 1000,
+        "s2_processed": 1000,
+        "s30_processed": 1000,
+        "s31_processed": 1000,
+        "s33_processed": 1000,
+        "s34_processed": 1000,
+        "s3_processed": 1000,
+        "s4_processed": 1000,
+        "s6_processed": 1000,
+        "s7_processed": 1000,
+        "s8_processed": 1000
+      },
+      "manifest": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/GRID_processed/train_split.json",
+      "manifest_sha256": "64b2d2e6011ca351df3697284b9492bdb694ab786469f8c28a40c4b3af17f50c",
+      "backup_sha256": "3b46bf9c68c6eb095ce10230445dae9b9002c5b95a1e77c7186839bb14b3e331",
+      "loaded_clips": 26984
+    },
+    "val": {
+      "clips": 3000,
+      "speakers": 3,
+      "speaker_counts": {
+        "s18_processed": 1000,
+        "s5_processed": 1000,
+        "s9_processed": 1000
+      },
+      "manifest": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/GRID_processed/val_split.json",
+      "manifest_sha256": "daf4d38031c4c3c14e26ebac56a3acafa93dc9c4da6bdc927542aa4aa6af9f0d",
+      "backup_sha256": "854ac6bf8e32fe5ecc73318c536be43f9b0c7390953a21ad9399c5dbe0b787d3",
+      "loaded_clips": 3000
+    },
+    "test": {
+      "clips": 3000,
+      "speakers": 3,
+      "speaker_counts": {
+        "s11_processed": 1000,
+        "s17_processed": 1000,
+        "s32_processed": 1000
+      },
+      "manifest": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/GRID_processed/test_split.json",
+      "manifest_sha256": "79036e09cebc9fa7e88a517f50d8b7b52d87df3f5ccad7c44653a343a162780f",
+      "backup_sha256": "c08df5eb72368710c470de8cf53b6cd7d19f967c17239db8ad086b6e68e228a9",
+      "loaded_clips": 3000
+    }
+  },
+  "speaker_overlap": {
+    "train_vs_val": [],
+    "train_vs_test": [],
+    "val_vs_test": []
+  },
+  "shared_original_manifests_archived": true,
+  "all_original_clip_identities_preserved": true,
+  "fresh_training_required": true,
+  "note": "Historical inventory.json and clustering outputs describe the old clip-random splits, not these new manifests."
+}

@@ -5,6 +5,7 @@
     "grid_raw_data_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/grid-data",
     "grid_processed_data_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/GRID_processed",
     "use_audio": false,
+    "train_augmentation": true,
     "audio_sample_rate": 16000,
     "max_frames": 125,
     "digit_max_frames": 125,
@@ -22,5 +23,5 @@
     "lambda_boundary": 1.0,
     "lambda_word_verif": 1.0,
     "vfa_boundary_threshold": 0.8,
-    "output_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/liptev-exp/digit"
+    "output_dir": "/mnt/lustre/ifm-lustre-prod-us-west1-a/av-data/liptev-exp/digit-speaker-disjoint"
 }

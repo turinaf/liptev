@@ -17,6 +17,9 @@ class Config:
         self.dataset = cfg.get("dataset", "grid")
         self.processed_data_dir = cfg.get("digit_processed_data_dir") if self.dataset == "digit" else cfg.get("grid_processed_data_dir")
         self.use_audio = cfg.get("use_audio", False)
+        self.train_augmentation = cfg.get("train_augmentation", False)
+        if not isinstance(self.train_augmentation, bool):
+            raise ValueError("train_augmentation must be a boolean")
         self.batch_size = cfg.get("batch_size", 32)
         self.learning_rate = cfg.get("learning_rate", 0.0001)
         self.epochs = cfg.get("epochs", 100)

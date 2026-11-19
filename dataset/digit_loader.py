@@ -7,10 +7,11 @@ import json
 import torchaudio
 from torch.utils.data import Dataset
 import torchvision.transforms as T
+from dataset.augmentation import VideoAugmentation
 
 class DigitDataset(Dataset):
     def __init__(self, data_dir, split='train', max_frames=125, transform=None, use_audio=False,
-                 source_fps=29.87):
+                 source_fps=29.87, augment=False):
         """
         Loads the preprocessed Digit dataset using pre-computed split files.
         """
@@ -18,6 +19,9 @@ class DigitDataset(Dataset):
         self.split = split
         self.max_frames = max_frames
         self.use_audio = use_audio
+        if augment and split != "train":
+            raise ValueError("Video augmentation is only supported for the train split")
+        self.augmentation = VideoAugmentation() if augment else None
         # Fallback fps for converting .lab seconds to frames when the
         # pipeline's per-video meta.json is unavailable (measured source
         # rates vary per device: ~29.9 fps VFR and 25 fps both occur).
@@ -231,7 +235,10 @@ class DigitDataset(Dataset):
                 tf = torch.tensor(tf)
             tensor_list.append(tf)
             
-        return torch.stack(tensor_list), true_len
+        video = torch.stack(tensor_list)
+        if self.augmentation is not None:
+            video = self.augmentation(video)
+        return video, true_len
 
     def _load_audio(self, path, video_len, fps):
         """Audio trimmed/padded to exactly the span the kept frames cover.

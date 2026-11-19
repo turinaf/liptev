@@ -1,0 +1,198 @@
+{
+  "method": "Resize the same raw GRID clip 1x, 2x and 4x, rerun MediaPipe at each resolution, and compare the current fixed 12px padding with padding scaled by the same factor. All clips retain the same transcript.",
+  "limitations": "Synthetic resizing of five in-domain test clips is a sensitivity experiment, not an external-speaker or real phone-video evaluation.",
+  "checkpoint_sha256": "7ed31125c258dde47a6f258a9487b46354f8271d8c50c76a393bb37ee8e4b894",
+  "validation_verification_threshold": 0.01718062162399292,
+  "rows": [
+    {
+      "clip": "s10_processed/lbwb2p.mp4",
+      "transcript": "lay blue with b two please",
+      "source_fps": 25.0,
+      "source_frames": 75,
+      "variants": {
+        "1x_padding_12": {
+          "verification_score": 0.9992434978485107,
+          "match": true,
+          "ctc_nll_per_token": 0.00040117930620908737,
+          "missing_detections": 0
+        },
+        "2x_padding_12": {
+          "verification_score": 0.0003055239503737539,
+          "match": false,
+          "ctc_nll_per_token": 2.4893462657928467,
+          "missing_detections": 0
+        },
+        "2x_padding_24": {
+          "verification_score": 0.9992226362228394,
+          "match": true,
+          "ctc_nll_per_token": 0.0008979663834907115,
+          "missing_detections": 0
+        },
+        "4x_padding_12": {
+          "verification_score": 4.2506531627850563e-08,
+          "match": false,
+          "ctc_nll_per_token": 5.67271089553833,
+          "missing_detections": 0
+        },
+        "4x_padding_48": {
+          "verification_score": 0.9992258548736572,
+          "match": true,
+          "ctc_nll_per_token": 0.0011228130897507071,
+          "missing_detections": 0
+        }
+      }
+    },
+    {
+      "clip": "s11_processed/bwiz5a.mp4",
+      "transcript": "bin white in z five again",
+      "source_fps": 25.0,
+      "source_frames": 75,
+      "variants": {
+        "1x_padding_12": {
+          "verification_score": 0.9991313815116882,
+          "match": true,
+          "ctc_nll_per_token": 0.0014648480573669076,
+          "missing_detections": 0
+        },
+        "2x_padding_12": {
+          "verification_score": 0.99480801820755,
+          "match": true,
+          "ctc_nll_per_token": 0.23581747710704803,
+          "missing_detections": 0
+        },
+        "2x_padding_24": {
+          "verification_score": 0.9983068704605103,
+          "match": true,
+          "ctc_nll_per_token": 0.0929732620716095,
+          "missing_detections": 0
+        },
+        "4x_padding_12": {
+          "verification_score": 0.009148357436060905,
+          "match": false,
+          "ctc_nll_per_token": 2.03877592086792,
+          "missing_detections": 0
+        },
+        "4x_padding_48": {
+          "verification_score": 0.9984626770019531,
+          "match": true,
+          "ctc_nll_per_token": 0.07997085899114609,
+          "missing_detections": 0
+        }
+      }
+    },
+    {
+      "clip": "s5_processed/pwwx9s.mp4",
+      "transcript": "place white with x nine soon",
+      "source_fps": 25.0,
+      "source_frames": 75,
+      "variants": {
+        "1x_padding_12": {
+          "verification_score": 0.9990791082382202,
+          "match": true,
+          "ctc_nll_per_token": 0.0007164510898292065,
+          "missing_detections": 0
+        },
+        "2x_padding_12": {
+          "verification_score": 0.9989569187164307,
+          "match": true,
+          "ctc_nll_per_token": 0.021708710119128227,
+          "missing_detections": 0
+        },
+        "2x_padding_24": {
+          "verification_score": 0.9990799427032471,
+          "match": true,
+          "ctc_nll_per_token": 0.000388293614378199,
+          "missing_detections": 0
+        },
+        "4x_padding_12": {
+          "verification_score": 5.573197086050641e-06,
+          "match": false,
+          "ctc_nll_per_token": 3.9560136795043945,
+          "missing_detections": 0
+        },
+        "4x_padding_48": {
+          "verification_score": 0.9990988969802856,
+          "match": true,
+          "ctc_nll_per_token": 0.0003870515211019665,
+          "missing_detections": 0
+        }
+      }
+    },
+    {
+      "clip": "s19_processed/lwwq9a.mp4",
+      "transcript": "lay white with q nine again",
+      "source_fps": 25.0,
+      "source_frames": 75,
+      "variants": {
+        "1x_padding_12": {
+          "verification_score": 0.9996870756149292,
+          "match": true,
+          "ctc_nll_per_token": 0.00145692506339401,
+          "missing_detections": 0
+        },
+        "2x_padding_12": {
+          "verification_score": 0.03859683498740196,
+          "match": true,
+          "ctc_nll_per_token": 1.5600684881210327,
+          "missing_detections": 0
+        },
+        "2x_padding_24": {
+          "verification_score": 0.9996501207351685,
+          "match": true,
+          "ctc_nll_per_token": 0.0009788128081709146,
+          "missing_detections": 0
+        },
+        "4x_padding_12": {
+          "verification_score": 0.002594470279291272,
+          "match": false,
+          "ctc_nll_per_token": 2.2610361576080322,
+          "missing_detections": 0
+        },
+        "4x_padding_48": {
+          "verification_score": 0.9996585845947266,
+          "match": true,
+          "ctc_nll_per_token": 0.002667653141543269,
+          "missing_detections": 0
+        }
+      }
+    },
+    {
+      "clip": "s8_processed/lgbl5n.mp4",
+      "transcript": "lay green by l five now",
+      "source_fps": 25.0,
+      "source_frames": 75,
+      "variants": {
+        "1x_padding_12": {
+          "verification_score": 0.9996517896652222,
+          "match": true,
+          "ctc_nll_per_token": 0.0004318117571529001,
+          "missing_detections": 0
+        },
+        "2x_padding_12": {
+          "verification_score": 0.9997000694274902,
+          "match": true,
+          "ctc_nll_per_token": 0.0004686116299126297,
+          "missing_detections": 0
+        },
+        "2x_padding_24": {
+          "verification_score": 0.9996474981307983,
+          "match": true,
+          "ctc_nll_per_token": 0.0004670979978982359,
+          "missing_detections": 0
+        },
+        "4x_padding_12": {
+          "verification_score": 0.9997977614402771,
+          "match": true,
+          "ctc_nll_per_token": 0.00966259092092514,
+          "missing_detections": 0
+        },
+        "4x_padding_48": {
+          "verification_score": 0.9996474981307983,
+          "match": true,
+          "ctc_nll_per_token": 0.0005814266041852534,
+          "missing_detections": 0
+        }
+      }
+    }
+  ]
+}

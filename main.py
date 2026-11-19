@@ -56,10 +56,10 @@ def main(config_path="config.json"):
         check_alignment_supervision(config.alignment_mode, config.lambda_align)
 
         if config.dataset == "digit":
-            train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps)
+            train_dataset = DigitDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps, augment=config.train_augmentation)
             val_dataset = DigitDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio, source_fps=config.digit_source_fps)
         else:
-            train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio)
+            train_dataset = GRIDDataset(config.processed_data_dir, split="train", max_frames=config.max_frames, use_audio=config.use_audio, augment=config.train_augmentation)
             val_dataset = GRIDDataset(config.processed_data_dir, split="val", max_frames=config.max_frames, use_audio=config.use_audio)
 
         for split_name, ds in (("train", train_dataset), ("val", val_dataset)):
@@ -102,7 +102,8 @@ def main(config_path="config.json"):
             writer = SummaryWriter(log_dir=os.path.join(config.output_dir, 'logs'))
             print(f"Training {config.dataset} with {config.token_level} tokens, "
                   f"vocab_size={vocab_size}, dropout={config.dropout}, "
-                  f"weight_decay={config.weight_decay}, up to {config.epochs} epochs")
+                  f"weight_decay={config.weight_decay}, train_augmentation={config.train_augmentation}, "
+                  f"up to {config.epochs} epochs")
             
         for epoch in range(1, config.epochs + 1):
             train_sampler.set_epoch(epoch)

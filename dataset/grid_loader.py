@@ -6,18 +6,22 @@ import json
 import torchaudio
 from torch.utils.data import Dataset
 import torchvision.transforms as T
+from dataset.augmentation import VideoAugmentation
 
 class GRIDDataset(Dataset):
-    def __init__(self, data_dir, split='train', max_frames=75, transform=None, use_audio=False):
+    def __init__(self, data_dir, split='train', max_frames=75, transform=None, use_audio=False,
+                 augment=False):
         """
         Loads the preprocessed GRID dataset using pre-computed split files.
-        data_dir should point to the processed directory (e.g. ./data) containing 
-        the train_split.json, val_split.json, and test_split.json manifests.
+        data_dir contains processed speaker folders and train/val/test manifests.
         """
         self.data_dir = data_dir
         self.split = split
         self.max_frames = max_frames
         self.use_audio = use_audio
+        if augment and split != "train":
+            raise ValueError("Video augmentation is only supported for the train split")
+        self.augmentation = VideoAugmentation() if augment else None
         self.transform = transform or T.Compose([
             T.ToTensor(),
               # Normalizes from [0, 1] to [-1, 1] generically safely
@@ -131,7 +135,10 @@ class GRIDDataset(Dataset):
                 tf = torch.tensor(tf)
             tensor_list.append(tf)
             
-        return torch.stack(tensor_list), true_len
+        video = torch.stack(tensor_list)
+        if self.augmentation is not None:
+            video = self.augmentation(video)
+        return video, true_len
 
     def _load_audio(self, path, video_len):
         # Audio trimmed/padded to the span the kept frames cover (GRID is

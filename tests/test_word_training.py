@@ -106,7 +106,7 @@ def test_grid_configs_enable_word_training_and_overfit_controls():
         assert cfg.weight_decay == 0.01
         assert cfg.dropout == 0.2
         assert cfg.early_stopping_patience == 5
-        assert cfg.output_dir.endswith("grid-word")
+        assert cfg.output_dir.endswith("grid-word-speaker-disjoint")
     digit = Config("config.digit.json")
     assert digit.weight_decay == digit.dropout == digit.early_stopping_patience == 0
     assert len(TranscriptTokenizer("digit", digit.token_level).vocab) == 13

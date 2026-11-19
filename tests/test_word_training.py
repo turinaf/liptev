@@ -208,7 +208,7 @@ def test_word_model_trains_all_heads_and_roundtrips(tmp_path):
     assert out["word_verif_logits"].shape == (2, 6)
 
 
-def test_word_inference_emits_direct_word_rows(tmp_path):
+def test_word_inference_emits_direct_word_rows(tmp_path, capsys):
     tokenizer = TranscriptTokenizer("grid", "word")
     checkpoint = {
         "model_state_dict": {}, "alignment_mode": "sim", "vfa_heads": True,
@@ -247,6 +247,9 @@ def test_word_inference_emits_direct_word_rows(tmp_path):
     rows = json.loads(report_path.read_text())["tokens"]
     assert [row["token"] for row in rows] == "bin blue at f two now".split()
     assert rows[3]["start_s"] == 0.28 and rows[3]["end_s"] == 0.36
+    alignment_lines = [line for line in capsys.readouterr().out.splitlines()
+                       if line.startswith("Alignment score")]
+    assert alignment_lines == ["Alignment score (diagnostic): 0.9000"]
 
 
 def test_evaluation_uses_checkpoint_word_tokens_with_legacy_config(tmp_path):

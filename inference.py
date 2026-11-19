@@ -402,16 +402,15 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
             print(f"Warning: EER thresholds calibrated for '{calib_ckpt}' but loaded "
                   f"'{os.path.basename(resolved_model_path)}' - decisions may be off.")
         print(format_score_decision("Verification score", prob, calib.get("verification")))
-        print(format_score_decision("Alignment score    ", align_prob, calib.get("alignment")))
         print(f"Decisions at EER-optimal thresholds from {calib_path}")
     else:
         # The classifier probability is not calibrated to a 0.5 cut (the
         # observed 0.000-for-everything); only a set-level EER threshold
         # makes these numbers decidable.
         print(f"Verification score (uncalibrated): {prob:.4f}")
-        print(f"Alignment score (uncalibrated):    {align_prob:.4f}")
         print("No compatible EER calibration is available.")
         print("Run test.py to calibrate EER thresholds for single-pair decisions.")
+    print(f"Alignment score (diagnostic): {align_prob:.4f}")
     print(f"=====================================")
 
     # --- Per-token forced alignment + scores (VFA heads) ---

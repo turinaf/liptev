@@ -63,7 +63,7 @@ python inference.py --config config.digit.json --video clip.mp4 --text "1 2 3" -
 
 Evaluation and inference prefer the best checkpoint, then the latest epoch if no best checkpoint exists. Run evaluation again after word training to create fresh EER thresholds; never reuse phoneme-model calibration.
 
-Prints global verification and alignment scores with decisions at the EER-optimal thresholds, plus a per-token table (timestamps, alignment score, verification score). With `--json`:
+Prints the global verification decision at its EER-optimal threshold and a diagnostic global alignment score without a verdict, plus a per-token table (timestamps, alignment score, verification score). All verdicts refer to verification, not alignment; JSON retains both raw global scores. With `--json`:
 
 ```json
 {

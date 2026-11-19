@@ -11,6 +11,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from dataset.preprocessing import extract_lip_frames
+from dataset.recording import prepare_recording
 from models.verification_model import LipTextVerificationModel
 from utils.dataset_utils import Config
 from utils.checkpoint import resolve_alignment_mode, resolve_vfa_heads, checkpoint_tokenizer
@@ -216,6 +217,19 @@ def resolve_video_fps(video_path, dataset, cap_fps=None):
         return 25.0, "default 25 fps"
     return cap_fps, "container"
 
+def print_input_report(report):
+    source = report["source"]
+    print(f"Input: {source['resolution'][0]}x{source['resolution'][1]}, "
+          f"{source['duration_s']}s, container {source['container_fps']} fps, measured "
+          f"{source['measured_fps']} fps{' (variable)' if source['variable_frame_rate'] else ''}")
+    if report.get("frames"):
+        print(f"Normalized: {report['frames']} frames at {report['target_fps']:g} fps "
+              f"({report['kept_duration_s']}s), rotation {report['rotation_degrees']} deg, "
+              f"mouth width {report['mouth_width_px']}px x scale {report['scale']}, "
+              f"lips detected in {report['detection_rate']:.0%} of frames")
+    for warning in report["warnings"]:
+        print(f"Warning: {warning}")
+
 def parse_input_text(text, dataset):
     if dataset == 'grid':
         words = []
@@ -270,7 +284,8 @@ def resolve_checkpoint_path(requested_model_path, config_output_dir):
 
 
 def run_inference(video_path, transcript, model_path=None, dataset=None, thresholds_path=None,
-                  json_path=None, config_path="config.json"):
+                  json_path=None, config_path="config.json", start=None, end=None,
+                  target_fps=None, legacy_preprocessing=False):
     cfg = Config(config_path)
     dataset = dataset or cfg.dataset
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -351,16 +366,32 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     )
     detector = vision.FaceLandmarker.create_from_options(options)
 
-    # Same preprocessing as training (pipeline/data_preparation.py):
-    # mediapipe lip crop (padding=12) resized to 96x96 RGB.
-    correct_orientation = (dataset == "digit")
-    frames = extract_lip_frames(video_path, detector=detector, correct_orientation=correct_orientation)
+    max_frames = cfg.digit_max_frames if dataset == "digit" else cfg.grid_max_frames
+    input_report = None
+    if legacy_preprocessing:
+        # Training crop applied to every decoded frame, without resampling,
+        # scale normalization or quality checks.
+        correct_orientation = (dataset == "digit")
+        frames = extract_lip_frames(video_path, detector=detector, correct_orientation=correct_orientation)
+        fps = None
+    else:
+        # Processed digit clips carry a wrong 25 fps label; their true rate
+        # (meta.json / sibling wav) defines the source timeline.
+        source_fps_override = None
+        if dataset == "digit":
+            known_fps, known_source = resolve_video_fps(video_path, dataset)
+            if not known_source.startswith(("container", "default")):
+                source_fps_override = known_fps
+        frames, input_report = prepare_recording(
+            video_path, detector, dataset, max_frames, digit_source_fps=cfg.digit_source_fps,
+            target_fps=target_fps, start=start, end=end, source_fps_override=source_fps_override)
+        fps = input_report["target_fps"]
+        print_input_report(input_report)
 
     if len(frames) == 0:
         print("Failed to load video frames.")
         sys.exit(1)
 
-    max_frames = cfg.max_frames
     true_video_len = min(len(frames), max_frames)
     if len(frames) > max_frames:
         frames = frames[:max_frames]
@@ -392,6 +423,8 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
     align_prob = align_out["alignment_score"].squeeze().item()
 
     print(f"=====================================")
+    if input_report is not None and not input_report["usable"]:
+        print("INPUT UNUSABLE: scores below are not a reliable MATCH/MISMATCH decision.")
     calib_path = resolve_thresholds_path(thresholds_path, resolved_model_path)
     calib = validate_calibration(
         load_eer_thresholds(calib_path), resolved_model_path, dataset,
@@ -421,11 +454,15 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
         print(header)
         if not (calib or {}).get("word_verification"):
             print("No independent word/token calibration; per-token verdicts are uncalibrated. Run test.py.")
-        cap = cv2.VideoCapture(video_path)
-        cap_fps = cap.get(cv2.CAP_PROP_FPS) if cap else 0
-        cap.release()
-        fps, fps_source = resolve_video_fps(video_path, dataset, cap_fps)
-        print(f"Timestamp rate: {fps:.3f} fps (source: {fps_source})")
+        if fps is None:
+            cap = cv2.VideoCapture(video_path)
+            cap_fps = cap.get(cv2.CAP_PROP_FPS) if cap else 0
+            cap.release()
+            fps, fps_source = resolve_video_fps(video_path, dataset, cap_fps)
+        else:
+            fps_source = "resampled"
+        offset = f", relative to --start {start}s" if start else ""
+        print(f"Timestamp rate: {fps:.3f} fps (source: {fps_source}{offset})")
         with torch.no_grad():
             frame_logits = align_out["vfa_frame_logits"][0, :true_video_len]
             bound_probs = torch.sigmoid(align_out["vfa_bound_logits"][0, :true_video_len]).cpu().numpy()
@@ -474,9 +511,11 @@ def run_inference(video_path, transcript, model_path=None, dataset=None, thresho
         "global": {
             "verification_score": prob,
             "alignment_score": align_prob,
-            "verdict": score_verdict(prob, (calib or {}).get("verification")),
+            "verdict": ("UNUSABLE_INPUT" if input_report is not None and not input_report["usable"]
+                        else score_verdict(prob, (calib or {}).get("verification"))),
         },
         "tokens": token_rows,
+        "input": input_report,
     }
     if json_path:
         with open(json_path, "w") as f:
@@ -493,6 +532,14 @@ if __name__ == "__main__":
     parser.add_argument("--thresholds", type=str, default=None, help="Optional eer_thresholds.json path; if omitted, auto-discovered next to the checkpoint")
     parser.add_argument("--json", type=str, default=None, help="Optional output path for the JSON report (global scores plus per-token timestamps/scores)")
 
+    parser.add_argument("--start", type=float, default=None, help="Seconds to skip before the spoken phrase")
+    parser.add_argument("--end", type=float, default=None, help="Seconds at which the spoken phrase ends")
+    parser.add_argument("--target-fps", type=float, default=None,
+                        help="Override the dataset frame rate (GRID 25; digit uses digit_source_fps)")
+    parser.add_argument("--legacy-preprocessing", action="store_true",
+                        help="Crop every decoded frame without resampling, scale normalization or quality checks")
+
     args = parser.parse_args()
     run_inference(args.video, args.text, args.model, args.dataset, args.thresholds,
-                  json_path=args.json, config_path=args.config)
+                  json_path=args.json, config_path=args.config, start=args.start, end=args.end,
+                  target_fps=args.target_fps, legacy_preprocessing=args.legacy_preprocessing)

@@ -118,17 +118,32 @@ For legacy phoneme checkpoints (no token-level stamp), inference still groups ph
 
 ### Recordings from arbitrary devices
 
-Speaker-disjoint evaluation addresses speaker overlap, **not studio-to-device domain shift**. The current GRID inference path still crops with fixed source-pixel padding and keeps only the first 75 frames without resampling. At 60 fps that is 1.25 seconds, not 3 seconds. Normalizing RGB values or changing the video's FPS label does not fix those problems.
+`inference.py` normalizes a new recording toward its dataset's training data before the usual 96x96 lip crop ([dataset/recording.py](dataset/recording.py)):
 
-A robust recording pipeline needs:
+| Step | GRID | Digit (iPhone/Android) |
+|---|---|---|
+| 1. Frame rate | Resample to **25 fps** by presentation timestamps (handles variable frame rate) | Resample to `digit_source_fps` (default 29.87), the native rate digit training frames were kept at; `--target-fps` overrides. Processed clips with `meta.json`/sibling wav use that true rate as their timeline |
+| 2. Face scale | If the mouth width is outside the GRID training range (5th–95th percentile 29–46 px; median 37.5 px, measured on 299 raw train clips at 360x288), rescale the frame so it is 37.5 px; otherwise untouched | Untouched: digit crops were taken at native, variable phone resolution |
+| 3. Duration | `--start/--end` seconds trim to the spoken phrase; at most `max_frames` (75 = 3 s) scored, with a warning when the recording is longer | Same, `digit_max_frames` (125 ≈ 4.2 s) |
+| 4. Orientation | Container rotation metadata is applied by OpenCV; if no face is upright, the 90/270/180-degree rotation exposing a face is used | Same |
+| 5. Quality | Lip-detection rate, duration and mouth size are reported. Detection below 80% of frames or less than 1 s of video marks the input **unusable**: verdict `UNUSABLE_INPUT` | Same |
 
-- **Timestamp-based temporal normalization:** decode real presentation timestamps (including variable-frame-rate inputs), resample to 25 fps without changing playback speed, and preserve the mapping to source timestamps.
-- **Scale-consistent spatial preprocessing:** correct orientation, align/stabilize the face, and crop lips with a margin relative to face/lip scale rather than a fixed 12 source pixels. Use the same crop convention in training and inference, and validate/retrain when changing it. Merely forcing every frame to 96x96 can distort the face or remove the context the model learned.
-- **Explicit duration handling:** for the current model, capture the complete short phrase within a three-second window and trim excess silence. Do not squeeze an arbitrarily long recording into 75 frames or silently discard its ending. Supporting a phrase anywhere in a longer recording needs windowed phrase-search semantics and calibration for multiple windows; verifying a whole long transcript needs variable-length training, appropriate data, and an explicit compute/duration limit. Raising `max_frames` alone is not sufficient.
-- **Quality checks and realistic data:** report unusable input for missing/poorly tracked faces, severe occlusion or incomplete speech instead of treating every recording as a decidable mismatch. Train with realistic crop/scale, lighting, blur/compression, pose and speaking-rate variations, updating timing labels consistently. Add representative non-studio recordings from multiple devices and speakers; GRID's fixed six-word vocabulary/grammar is not unrestricted speech.
-- **Deployment validation:** keep real-world validation and test subjects separate, select/calibrate only on validation, and report false accepts and false rejects at that fixed threshold on untouched speakers/devices.
+```bash
+python inference.py --config config.grid.json --video phone.mp4 --text "bin blue at f two now" --start 0.3 --end 2.9
+```
 
-The spatial/photometric training augmentation above is implemented. Timestamp resampling, scale-normalized lip cropping, duration handling and input-quality rejection remain recommendations, not implemented fixes. In particular, do not impose GRID's 75-frame/25-fps assumption on smartphone digit recordings; proper variable-frame-rate support needs presentation timestamps and consistently transformed timing labels. See [the investigation](analysis/grid_generalization/README.md) for controlled crop/FPS failures and [the current split visualization](analysis/grid_generalization/speaker_split.png).
+The JSON report gains an `"input"` block (source resolution, container/measured fps, variable-frame-rate flag, rotation, scale, detection rate, warnings). Token timestamps are relative to `--start`. `--legacy-preprocessing` restores the previous behaviour (every decoded frame, no resampling, no scaling or checks). The frame budget now follows the selected dataset, so `--dataset digit` with a GRID config uses `digit_max_frames`.
+
+With the earlier all-speaker GRID checkpoint, five GRID test clips scored identically to the legacy path at their native 360x288/25 fps. Variants that previously all failed (4x upscaled, 60 fps, a 1080x1920 portrait frame) all scored above the EER threshold after normalization. A synthetic 30 fps clip built by duplicating 25 fps frames regressed on 3/5 clips: converting back repeats/skips about 40 ms per frame, which shows the model is sensitive to frame-level timing jitter (a real 30 fps camera has at most ~17 ms resampling error).
+
+Remaining limitations:
+
+- Keep the lead-in short (under about 0.5 s) and capture the complete phrase; silence is not trimmed automatically.
+- Scale normalization targets GRID's lip size but cannot recreate GRID's studio lighting, pose or camera; train with representative non-studio recordings and evaluate on held-out speakers/devices, calibrating only on validation.
+- The digit target rate is a single configured value even though digit training mixes ~29.9 and 25 fps clips; verify `digit_source_fps` against the real `meta.json` rates on the digit server.
+- Temporal-jitter training augmentation (with consistently remapped timing labels) is not implemented.
+
+Speaker-disjoint evaluation addresses speaker overlap, not studio-to-device domain shift. See [the investigation](analysis/grid_generalization/README.md) for controlled crop/FPS failures and [the current split visualization](analysis/grid_generalization/speaker_split.png).
 
 ## Training data
 

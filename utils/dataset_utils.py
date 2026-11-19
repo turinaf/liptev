@@ -38,10 +38,9 @@ class Config:
             raise ValueError("early_stopping_patience must be nonnegative")
         # Frame budgets: GRID clips are 3 s @ 25 fps; digit clips are longer
         # (p95 = 112 frames at ~30 fps source rate).
-        if self.dataset == "digit":
-            self.max_frames = cfg.get("digit_max_frames", 125)
-        else:
-            self.max_frames = cfg.get("max_frames", 75)
+        self.grid_max_frames = cfg.get("max_frames", 75)
+        self.digit_max_frames = cfg.get("digit_max_frames", 125)
+        self.max_frames = self.digit_max_frames if self.dataset == "digit" else self.grid_max_frames
         self.output_dir = cfg.get("output_dir", "./exp/no_audio")
         self.lip_backbone_pretrained = cfg.get("lip_backbone_pretrained", True)
         # MediaPipe face landmarker used to crop lip regions (pipeline + inference)

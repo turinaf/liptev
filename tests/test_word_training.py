@@ -228,12 +228,17 @@ def test_word_inference_emits_direct_word_rows(tmp_path, capsys):
     spans = [(i, 1 + 2 * i, 3 + 2 * i) for i in range(6)]
     import numpy as np
     report_path = tmp_path / "report.json"
+    input_report = {"source": {"resolution": [360, 288], "duration_s": 0.6, "container_fps": 25.0,
+                               "measured_fps": 25.0, "variable_frame_rate": False},
+                    "target_fps": 25.0, "frames": 16, "kept_duration_s": 0.64, "rotation_degrees": 0,
+                    "mouth_width_px": 37.5, "scale": 1.0, "detection_rate": 1.0,
+                    "warnings": [], "usable": False}
     with (mock.patch("inference.torch.load", return_value=checkpoint),
           mock.patch("inference.resolve_checkpoint_path", return_value="word.pt"),
           mock.patch("inference.LipTextVerificationModel", return_value=model) as constructor,
           mock.patch("inference.os.path.exists", return_value=True),
           mock.patch("inference.vision.FaceLandmarker.create_from_options"),
-          mock.patch("inference.extract_lip_frames", return_value=[np.zeros((96, 96, 3))] * 16),
+          mock.patch("inference.prepare_recording", return_value=([np.zeros((96, 96, 3))] * 16, input_report)),
           mock.patch("inference.cv2.VideoCapture") as cap,
           mock.patch("inference.load_eer_thresholds", return_value=None),
           mock.patch("inference.forced_token_spans", return_value=(spans, False)),
@@ -244,7 +249,9 @@ def test_word_inference_emits_direct_word_rows(tmp_path, capsys):
     aggregate.assert_not_called()
     assert constructor.call_args.kwargs["vocab_size"] == 53
     assert model.call_args.args[1].tolist() == [tokenizer.encode("bin blue at f two now")]
-    rows = json.loads(report_path.read_text())["tokens"]
+    report = json.loads(report_path.read_text())
+    assert report["global"]["verdict"] == "UNUSABLE_INPUT" and report["input"] == input_report
+    rows = report["tokens"]
     assert [row["token"] for row in rows] == "bin blue at f two now".split()
     assert rows[3]["start_s"] == 0.28 and rows[3]["end_s"] == 0.36
     alignment_lines = [line for line in capsys.readouterr().out.splitlines()

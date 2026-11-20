@@ -75,7 +75,8 @@ def test(config_path="config.json"):
         
     print(f"Loading test dataset from {dataset_path}...")
     if cfg.dataset == "digit":
-        test_dataset = DigitDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+        test_dataset = DigitDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames,
+                                    use_audio=cfg.use_audio, source_fps=cfg.digit_source_fps)
     else:
         test_dataset = GRIDDataset(data_dir=dataset_path, split='test', max_frames=cfg.max_frames, use_audio=cfg.use_audio)
     
@@ -94,6 +95,7 @@ def test(config_path="config.json"):
     checkpoint = torch.load(model_save_path, map_location=device)
     tokenizer = checkpoint_tokenizer(checkpoint, cfg.dataset)
     controlled_grid = cfg.dataset == "grid" and tokenizer.token_level == "word"
+    balanced_tokens = controlled_grid or (cfg.dataset == "digit" and cfg.balanced_word_supervision)
     word_metrics = bool(checkpoint.get("vfa_heads")) and (controlled_grid or cfg.dataset == "digit")
     test_loader = DataLoader(
         test_dataset,
@@ -101,7 +103,7 @@ def test(config_path="config.json"):
         shuffle=False,
         collate_fn=collate_fn_factory(
             cfg.dataset, token_level=tokenizer.token_level, seed=cfg.validation_seed,
-            balanced_word_supervision=controlled_grid),
+            balanced_word_supervision=balanced_tokens),
     )
 
     # Handle both standalone weights and wrapped checkpoint dictionaries
@@ -122,8 +124,10 @@ def test(config_path="config.json"):
     model.load_state_dict(clean_state_dict)
     
     dataset_class = DigitDataset if cfg.dataset == "digit" else GRIDDataset
+    dataset_kwargs = {"source_fps": cfg.digit_source_fps} if cfg.dataset == "digit" else {}
     val_dataset = dataset_class(
-        data_dir=dataset_path, split="val", max_frames=cfg.max_frames, use_audio=cfg.use_audio)
+        data_dir=dataset_path, split="val", max_frames=cfg.max_frames,
+        use_audio=cfg.use_audio, **dataset_kwargs)
     if len(val_dataset) == 0:
         raise RuntimeError("Validation split is empty; cannot calibrate on the test set")
     val_pool = [sample["transcript"] for sample in getattr(val_dataset, "samples", [])]
@@ -131,7 +135,7 @@ def test(config_path="config.json"):
         val_dataset, batch_size=cfg.batch_size, shuffle=False,
         collate_fn=collate_fn_factory(
             cfg.dataset, transcript_pool=val_pool, token_level=tokenizer.token_level,
-            seed=cfg.validation_seed, balanced_word_supervision=controlled_grid),
+            seed=cfg.validation_seed, balanced_word_supervision=balanced_tokens),
     )
     print("\n[--- Validation Calibration ---]")
     val_metrics = evaluate_model(

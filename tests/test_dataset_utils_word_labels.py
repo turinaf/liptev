@@ -13,6 +13,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.dataset_utils import collate_fn_factory, substitution_position
+from utils.negative_sampler import NegativeSampler
 
 
 def _digit_item(transcript, digit_times, video_len=20):
@@ -87,3 +88,46 @@ def test_collate_random_negative_masks_word_labels():
         batch = _collate_digit([item])
     assert not batch['word_label_mask'][1].any()
     assert batch['word_spans'][1].sum() == 0
+
+
+def test_balanced_digit_sampler_preserves_pause_slots_and_varies_edit_count():
+    sampler = NegativeSampler([], dataset_name="digit", rng=random.Random(42))
+    positive = "2 6 8 ! 9 2 9 8".split()
+    edit_counts = set()
+    for _ in range(100):
+        negative = sampler.word_substitution(" ".join(positive)).split()
+        assert len(negative) == len(positive)
+        assert negative[3] == "!"
+        assert all(token in "0123456789" for i, token in enumerate(negative) if i != 3)
+        count = sum(p != n for p, n in zip(positive, negative))
+        assert count >= 1
+        edit_counts.add(count)
+    assert 1 in edit_counts and 7 in edit_counts
+
+
+def test_balanced_digit_multi_substitution_labels_all_annotated_slots():
+    digits = "2 6 8 0 9 2 9 8".split()
+    item = _digit_item(" ".join(digits), [(d, 2 * i, 2 * i + 2) for i, d in enumerate(digits)])
+    collate = collate_fn_factory("digit", balanced_word_supervision=True, seed=42)
+    with mock.patch.object(NegativeSampler, "word_substitution", return_value="1 2 3 4 5 6 7 8"):
+        batch = collate([item])
+        untimed = collate([dict(item, digit_times=[])])
+
+    assert batch["label"].tolist() == [1, 0]
+    assert batch["word_label_mask"][1].all()
+    assert batch["word_labels"][1].tolist() == [0] * 7 + [1]
+    assert torch.equal(batch["word_spans"][1], batch["word_spans"][0])
+    assert not batch["alignment_targets"][1].any()
+    assert untimed["label"].tolist() == [1, 0]
+    assert not untimed["word_label_mask"].any()
+
+
+def test_balanced_digit_arbitrary_transcript_only_supervises_clip():
+    item = _digit_item("1 2 3", [("1", 0, 6), ("2", 6, 12), ("3", 12, 18)])
+    collate = collate_fn_factory("digit", balanced_word_supervision=True, seed=0)
+    with mock.patch.object(NegativeSampler, "sample", return_value="9 3 2"):
+        batch = collate([item])
+    assert batch["label"].tolist() == [1, 0]
+    assert batch["transcript"][1] == "9 3 2"
+    assert not batch["word_label_mask"][1].any()
+    assert not batch["word_spans"][1].any()

@@ -3,7 +3,7 @@ import json
 import random
 import torch
 from utils.tokenizer import TranscriptTokenizer
-from utils.negative_sampler import NegativeSampler
+from utils.negative_sampler import DIGITS, NegativeSampler
 from utils.alignment import expand_token_ranges, build_alignment_targets
 
 class Config:
@@ -75,8 +75,8 @@ def substitution_position(pos_words, neg_words):
 
 def collate_fn_factory(dataset_name, transcript_pool=None, token_level="phoneme", seed=None,
                        balanced_word_supervision=False):
-    if balanced_word_supervision and (dataset_name != "grid" or token_level != "word"):
-        raise ValueError("Balanced word supervision requires GRID word tokens")
+    if balanced_word_supervision and dataset_name == "grid" and token_level != "word":
+        raise ValueError("Balanced supervision for GRID requires word tokens")
     tokenizer = TranscriptTokenizer(dataset_name, token_level)
     global_sampler = NegativeSampler(transcript_pool or [], dataset_name=dataset_name)
 
@@ -134,24 +134,27 @@ def collate_fn_factory(dataset_name, transcript_pool=None, token_level="phoneme"
                 audio_lens.append(int(item.get('audio_len', aud.shape[1])))
 
             # --- NEGATIVE SAMPLE ---
-            videos.append(vid)
-            controlled = balanced_word_supervision and sampler.rng.random() < 0.75
+            can_substitute = dataset_name != "digit" or any(d in DIGITS for d in trans.split())
+            controlled = balanced_word_supervision and can_substitute and sampler.rng.random() < 0.75
             neg_trans = sampler.word_substitution(trans) if controlled else sampler.sample(trans)
-            if balanced_word_supervision and neg_trans == trans:
+            if balanced_word_supervision and neg_trans == trans and can_substitute:
                 # A one-transcript pool can defeat the legacy random sampler.
                 controlled = True
                 neg_trans = sampler.word_substitution(trans)
+            if balanced_word_supervision and neg_trans == trans:
+                continue
+            videos.append(vid)
             neg_indices = tokenizer.encode(neg_trans)
             phonemes_indices_list.append(torch.tensor(neg_indices, dtype=torch.long))
 
-            # Only controlled replacements (or legacy single substitutions)
-            # have known geometry. Random/shuffled multi-word negatives stay
-            # masked: position-wise equality does not establish their timing.
+            # Balanced digit batches use only controlled negatives for local
+            # supervision; arbitrary transcripts may not share the same slots.
             pos_words = trans.split() if dataset_name == "digit" \
                 else [w for w, _ in tokenizer.per_word(trans)]
             neg_words = neg_trans.split() if dataset_name == "digit" \
                 else [w for w, _ in tokenizer.per_word(neg_trans)]
-            sub_pos = substitution_position(pos_words, neg_words) if token_times else None
+            legacy_single = not (balanced_word_supervision and dataset_name == "digit")
+            sub_pos = substitution_position(pos_words, neg_words) if token_times and legacy_single else None
 
             if controlled and token_times:
                 neg_times = [([idx], fs, fe) for idx, (_, fs, fe) in zip(neg_indices, token_times)]

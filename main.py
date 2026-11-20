@@ -68,6 +68,10 @@ def main(config_path="config.json"):
                     f"{config.dataset} '{split_name}' split is empty in '{config.processed_data_dir}'. "
                     f"Check the processed data dir in '{config_path}' or run pipeline/data_preparation.py."
                 )
+            if config.dataset == "digit" and config.balanced_word_supervision and not any(
+                sample.get("lab_times") for sample in ds.samples
+            ):
+                raise RuntimeError(f"Digit '{split_name}' split has no usable .lab timestamps for token supervision.")
         
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
         val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)

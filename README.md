@@ -41,10 +41,10 @@ Digit uses `digit_processed_data_dir` (default configuration: `./data/digit`) wi
 On the digit server, generate these shared manifests without reprocessing videos:
 
 ```bash
-python digit_create_splits.py --config config.json
+python digit_create_splits.py --config config.digit.json
 ```
 
-This command explicitly selects digit and reads `digit_processed_data_dir`, even if the config's current dataset is GRID. For **training**, use the full digit-compatible settings from `config.digit.json` as that server's `config.json`, retain the correct data paths, and choose a writable, fresh `output_dir`. Changing only `"dataset"` in a GRID training config is not sufficient. Digit data is absent on this server, so its real subset counts have not been measured here.
+This command explicitly selects digit and reads `digit_processed_data_dir`, even if the config's current dataset is GRID. For **training**, use `config.digit.json` with the correct data paths and a writable, fresh `output_dir`. Changing only `"dataset"` in a GRID training config is not sufficient. A single subset can be used to smoke-test loading and supervision, but does not support the standard held-out-subset split described above.
 
 ### Training
 
@@ -69,7 +69,9 @@ GRID trains for **at most 30 epochs**, with AdamW weight decay `0.01` and featur
 
 The best checkpoint minimizes the **mean of global and word validation EER**, with word scores evaluated on inference-style Viterbi spans, not ground-truth spans. `early_stopping_patience: 5` stops after five consecutive epochs without improvement (`0` disables stopping). Validation logs include word AUC/EER and positive/negative counts; DDP gathers both global and word scores across ranks before selection/stopping. Each best checkpoint also gets separate global, alignment and word thresholds calibrated on validation, bound to its weights by SHA-256. `supervise_silence: true` teaches the frame head silence class 0 outside annotated speech on real positive frames; padding, negatives and samples without alignments remain excluded. Boundary targets remain token-to-token transitions.
 
-Word models now start fresh and write to `liptev-exp/grid-word-speaker-disjoint`, separate from earlier clip-random and phoneme experiments. **Retrain from fresh initialization: the old `grid-word` checkpoint saw every speaker, including the new validation/test speakers, and cannot provide an unseen-speaker evaluation or be used as its fine-tuning starting point.** Until retraining produces a checkpoint, default GRID inference/evaluation has no weights in the new output directory. A later run reuses this directory and overwrites matching checkpoint/calibration filenames; back it up first if needed. Checkpoints record the dataset, token level, exact vocabulary and dropout; evaluation/inference use checkpoint tokenization rather than the current config. Digit also uses a fresh `digit-speaker-disjoint` output directory for its new split; its existing negative sampling, losses, tokenization, optimizer and epoch settings remain unchanged.
+Word models now start fresh and write to `liptev-exp/grid-word-speaker-disjoint`, separate from earlier clip-random and phoneme experiments. **Retrain from fresh initialization: the old `grid-word` checkpoint saw every speaker, including the new validation/test speakers, and cannot provide an unseen-speaker evaluation or be used as its fine-tuning starting point.** Until retraining produces a checkpoint, default GRID inference/evaluation has no weights in the new output directory. A later run reuses this directory and overwrites matching checkpoint/calibration filenames; back it up first if needed. Checkpoints record the dataset, token level, exact vocabulary and dropout; evaluation/inference use checkpoint tokenization rather than the current config.
+
+Digit training now also enables `balanced_word_supervision`. Controlled single- and multi-digit substitutions keep each original `.lab` span, leaving `!` pause markers unchanged. A replaced digit is labeled 0 and an unchanged token 1. Arbitrary negative transcripts still train the clip head, but do not supply digit labels. The equal-weight token loss prevents matches from overwhelming mismatches; checkpoint selection averages clip EER and digit EER measured on forced spans. Retrain to update raw scores: recalibrating an old checkpoint only changes its verdict threshold. The new default output directory is `liptev-exp/digit-balanced-speaker-disjoint`.
 
 #### On-the-fly video augmentation
 

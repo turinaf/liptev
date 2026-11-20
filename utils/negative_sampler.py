@@ -1,6 +1,8 @@
 import random
 import string
 
+DIGITS = tuple(string.digits)
+
 # GRID's fixed grammar swaps phonetically confusable words within the same
 # grammatical class (color->color, letter->letter, digit-word->digit-word).
 GRID_WORD_CLASSES = [
@@ -54,10 +56,7 @@ class NegativeSampler:
             return positive_transcript
 
         if self.dataset_name == "digit":
-            # Swap one digit for a different digit (identity is useless).
-            idx = self.rng.randrange(len(words))
-            words[idx] = self.rng.choice([d for d in map(str, range(10)) if d != words[idx]])
-            return " ".join(words)
+            return self._digit_substitution(words, multi=False)
 
         idx = self.rng.randrange(len(words))
         word = words[idx].lower()
@@ -70,6 +69,16 @@ class NegativeSampler:
             words[idx] = self.rng.choice([w for w in pool if w != word])
         return " ".join(words)
 
+    def _digit_substitution(self, words, multi):
+        positions = [pos for pos, word in enumerate(words) if word in DIGITS]
+        if not positions:
+            return " ".join(words)
+        n = len(positions)
+        count = self.rng.randint(2, n) if multi and n > 1 and self.rng.random() >= 0.5 else 1
+        for pos in self.rng.sample(positions, count):
+            words[pos] = self.rng.choice([digit for digit in DIGITS if digit != words[pos]])
+        return " ".join(words)
+
     def word_substitution(self, positive_transcript):
         """Controlled replacements with known position-wise labels.
 
@@ -79,6 +88,8 @@ class NegativeSampler:
         words = positive_transcript.split()
         if not words:
             raise ValueError("Cannot substitute words in an empty transcript")
+        if self.dataset_name == "digit":
+            return self._digit_substitution(words, multi=True)
         n = len(words)
         count = 1 if n == 1 or self.rng.random() < 0.5 else self.rng.randint(2, n)
         cross_class = self.rng.random() < 0.25

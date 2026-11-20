@@ -292,7 +292,7 @@ def test_calibration_persists_validation_not_test_metrics(tmp_path):
     assert save.call_args.args[1]["split"] == "val"
 
 
-def test_digit_evaluation_gets_independent_token_calibration_without_word_sampling(tmp_path):
+def test_digit_evaluation_calibrates_with_balanced_token_negatives(tmp_path):
     import test as entrypoint
     from utils.dataset_utils import Config
     cfg = Config("config.digit.json")
@@ -310,4 +310,4 @@ def test_digit_evaluation_gets_independent_token_calibration_without_word_sampli
           mock.patch.object(entrypoint, "save_eer_thresholds")):
         entrypoint.test("config.digit.json")
     assert all(call.kwargs["word_metrics"] for call in evaluate.call_args_list)
-    assert all(not call.kwargs["balanced_word_supervision"] for call in collate.call_args_list)
+    assert all(call.kwargs["balanced_word_supervision"] for call in collate.call_args_list)

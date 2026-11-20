@@ -1,5 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=liptev-train
+#SBATCH --account=gtt_interns
+#SBATCH --qos=production
 #SBATCH --partition=a3m
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1

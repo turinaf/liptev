@@ -266,9 +266,3 @@ def collate_fn_factory(dataset_name, transcript_pool=None, token_level="phoneme"
 
         return batch_dict
     return collate_fn
-
-# Default instances for tests
-default_config = Config()
-collate_fn = collate_fn_factory(
-    default_config.dataset, token_level=default_config.token_level,
-    balanced_word_supervision=default_config.balanced_word_supervision)

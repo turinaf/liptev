@@ -1,5 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=liptev-test
+#SBATCH --account=gtt_interns
+#SBATCH --qos=production
 #SBATCH --partition=a3m
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8

@@ -1,5 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=liptev-preproc
+#SBATCH --account=gtt_interns
+#SBATCH --qos=production
 #SBATCH --partition=a3m              # GPU nodes: NVIDIA drivers provide libEGL.so.1, which mediapipe needs
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
